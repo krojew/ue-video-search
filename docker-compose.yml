@@ -1,0 +1,37 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_HOST=qdrant
+      - OLLAMA_BASE_URL=http://ollama:11434
+    device_requests:
+      - driver: nvidia
+        count: all
+        capabilities: [gpu]
+    volumes:
+      - app_data:/app/data
+    depends_on:
+      - qdrant
+      - ollama
+
+  qdrant:
+    image: qdrant/qdrant:v1.12.1
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  app_data:
+  qdrant_data:
+  ollama_data:

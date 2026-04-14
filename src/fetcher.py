@@ -139,12 +139,6 @@ def _fetch_channel_videos_with_yt_dlp(channel_url: str) -> list[dict[str, Any]]:
     return converted
 
 
-def _extract_channel_id(url: str) -> str | None:
-    """Extract a channel handle or ID from a URL for scrapetube."""
-    # scrapetube accepts channel_url directly in newer versions
-    return None
-
-
 def fetch_video_list(
     skip_uefn: bool = True,
     skip_automotive: bool = True,

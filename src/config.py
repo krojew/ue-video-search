@@ -23,7 +23,7 @@ WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
 # ── Ollama ─────────────────────────────────────────────
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "qwen3-embedding")
-EMBEDDING_DIM = int(os.environ.get("EMBEDDING_DIM", "4096"))
+EMBEDDING_DIM = int(os.environ.get("EMBEDDING_DIM", "1024"))
 
 # ── Qdrant ─────────────────────────────────────────────
 QDRANT_HOST = os.environ.get("QDRANT_HOST", "localhost")

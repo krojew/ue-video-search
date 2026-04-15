@@ -60,8 +60,35 @@ def transcribe_audio(audio_path: Path, model: whisper.Whisper | None = None) -> 
         word_timestamps=False,
     )
 
-    segments = []
+    # Merge segments that span the same sentence
+    merged_segments = []
+    current_segment = None
     for seg in result.get("segments", []):
+        text = seg["text"].strip()
+        if not text:
+            continue
+
+        if current_segment is None:
+            current_segment = {
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": text
+            }
+        else:
+            current_segment["end"] = seg["end"]
+            current_segment["text"] += " " + text
+
+        # If the text ends with sentence-ending punctuation, finalize the segment
+        if re.search(r'[.!?]\s*$', text):
+            merged_segments.append(current_segment)
+            current_segment = None
+
+    # Add any remaining segment
+    if current_segment is not None:
+        merged_segments.append(current_segment)
+
+    segments = []
+    for seg in merged_segments:
         text = seg["text"].strip()
         sentences = re.split(r'(?<=[.!?])\s+', text)
         sentences = [s.strip() for s in sentences if s.strip()]

@@ -11,3 +11,4 @@ data/transcripts/
 venv/
 .venv/
 README.md
+snapshots/

@@ -12,7 +12,7 @@ def embed_text(text: str) -> list[float]:
     resp = requests.post(
         f"{OLLAMA_BASE_URL}/api/embed",
         json={"model": EMBEDDING_MODEL, "input": text},
-        timeout=120,
+        timeout=300,
     )
     resp.raise_for_status()
     data = resp.json()

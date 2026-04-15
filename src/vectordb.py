@@ -19,7 +19,7 @@ from .config import COLLECTION_NAME, EMBEDDING_DIM, QDRANT_HOST, QDRANT_PORT
 
 
 def get_client() -> QdrantClient:
-    return QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
+    return QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=300)
 
 
 def ensure_collection(client: QdrantClient | None = None) -> None:

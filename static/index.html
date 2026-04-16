@@ -450,6 +450,10 @@
         <input type="checkbox" id="skip-archvis" checked>
         Skip archvis videos
       </label>
+      <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px;">
+        <input type="checkbox" id="include-streams" checked>
+        Include live streams
+      </label>
       <button class="btn" id="btn-ingest-full">Full Ingest</button>
       <button class="btn btn-secondary" id="btn-ingest-update">Update (new only)</button>
     </div>
@@ -655,10 +659,12 @@
     const skipUefn = document.getElementById('skip-uefn').checked;
     const skipAutomotive = document.getElementById('skip-automotive').checked;
     const skipArchvis = document.getElementById('skip-archvis').checked;
+    const includeStreams = document.getElementById('include-streams').checked;
     const url = '/api/ingest?incremental=' + incremental +
       '&skip_uefn=' + skipUefn +
       '&skip_automotive=' + skipAutomotive +
-      '&skip_archvis=' + skipArchvis;
+      '&skip_archvis=' + skipArchvis +
+      '&include_streams=' + includeStreams;
 
     try {
       const r = await fetch(url, { method: 'POST' });

@@ -103,6 +103,7 @@ async def api_ingest_start(
     skip_uefn: bool = Query(True, description="Skip videos with UEFN or Fortnite in title"),
     skip_automotive: bool = Query(True, description="Skip videos with automotive in title"),
     skip_archvis: bool = Query(True, description="Skip videos with archvis in title"),
+    include_streams: bool = Query(True, description="Include videos from the Live/streams tab"),
 ) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
     started = ingest_worker.start_ingest(
@@ -112,6 +113,7 @@ async def api_ingest_start(
         skip_uefn=skip_uefn,
         skip_automotive=skip_automotive,
         skip_archvis=skip_archvis,
+        include_streams=include_streams,
     )
     if not started:
         return {"ok": False, "message": "Ingest is already running."}

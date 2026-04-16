@@ -23,6 +23,7 @@ def run_fetch(
     skip_uefn: bool = True,
     skip_automotive: bool = True,
     skip_archvis: bool = True,
+    include_streams: bool = True,
 ) -> list[dict[str, Any]]:
     """Fetch (or load cached) video list from the channel."""
     if use_cached:
@@ -36,6 +37,7 @@ def run_fetch(
         skip_uefn=skip_uefn,
         skip_automotive=skip_automotive,
         skip_archvis=skip_archvis,
+        include_streams=include_streams,
     )
     save_video_list(videos)
     console.print(f"[green]Found {len(videos)} videos matching criteria.[/green]")
@@ -46,6 +48,7 @@ def run_fetch_incremental(
     skip_uefn: bool = True,
     skip_automotive: bool = True,
     skip_archvis: bool = True,
+    include_streams: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Fetch fresh video list and merge with cached. Returns (full_list, new_videos)."""
     cached = load_video_list()
@@ -55,6 +58,7 @@ def run_fetch_incremental(
         skip_uefn=skip_uefn,
         skip_automotive=skip_automotive,
         skip_archvis=skip_archvis,
+        include_streams=include_streams,
     )
 
     merged, new_only = merge_video_lists(cached, fresh)
@@ -147,6 +151,7 @@ def run_ingest(
     skip_uefn: bool = True,
     skip_automotive: bool = True,
     skip_archvis: bool = True,
+    include_streams: bool = True,
 ) -> None:
     """Full ingest pipeline for all videos."""
     if videos is None:
@@ -154,6 +159,7 @@ def run_ingest(
             skip_uefn=skip_uefn,
             skip_automotive=skip_automotive,
             skip_archvis=skip_archvis,
+            include_streams=include_streams,
         )
     _ingest_videos(videos, skip_indexed=skip_indexed, label="Processing videos")
 
@@ -162,12 +168,14 @@ def run_ingest_new_only(
     skip_uefn: bool = True,
     skip_automotive: bool = True,
     skip_archvis: bool = True,
+    include_streams: bool = True,
 ) -> None:
     """Incremental ingest: fetch new videos from the channel and only process those."""
     _all, new_only = run_fetch_incremental(
         skip_uefn=skip_uefn,
         skip_automotive=skip_automotive,
         skip_archvis=skip_archvis,
+        include_streams=include_streams,
     )
 
     if not new_only:

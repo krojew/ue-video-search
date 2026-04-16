@@ -105,6 +105,7 @@ def _run_ingest(
     skip_uefn: bool = True,
     skip_automotive: bool = True,
     skip_archvis: bool = True,
+    include_streams: bool = True,
 ) -> None:
     """Blocking ingest function meant to run in a thread."""
     global _running, _status
@@ -120,6 +121,7 @@ def _run_ingest(
                 skip_uefn=skip_uefn,
                 skip_automotive=skip_automotive,
                 skip_archvis=skip_archvis,
+                include_streams=include_streams,
             )
             merged, new_only = merge_video_lists(cached, fresh)
             save_video_list(merged)
@@ -131,6 +133,7 @@ def _run_ingest(
                 skip_uefn=skip_uefn,
                 skip_automotive=skip_automotive,
                 skip_archvis=skip_archvis,
+                include_streams=include_streams,
             )
             save_video_list(videos)
             _status.new_videos_found = len(videos)
@@ -230,6 +233,7 @@ def start_ingest(
     skip_uefn: bool = True,
     skip_automotive: bool = True,
     skip_archvis: bool = True,
+    include_streams: bool = True,
 ) -> bool:
     """Start the ingest pipeline in a background thread. Returns False if already running."""
     global _event_loop
@@ -238,7 +242,7 @@ def start_ingest(
     _event_loop = loop
     t = threading.Thread(
         target=_run_ingest,
-        args=(incremental, reindex, skip_uefn, skip_automotive, skip_archvis),
+        args=(incremental, reindex, skip_uefn, skip_automotive, skip_archvis, include_streams),
         daemon=True,
     )
     t.start()

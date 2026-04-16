@@ -20,10 +20,16 @@ from .config import (
 )
 
 
-def _parse_duration_text(text: str) -> int:
-    """Convert duration strings like '1:23:45' or '23:45' to total seconds."""
+def _parse_duration_text(text: str) -> int | None:
+    """Convert duration strings like '1:23:45' or '23:45' to total seconds.
+
+    Returns None for non-numeric values (e.g. 'Upcoming' for scheduled streams).
+    """
     parts = text.strip().split(":")
-    parts = [int(p) for p in parts]
+    try:
+        parts = [int(p) for p in parts]
+    except ValueError:
+        return None
     if len(parts) == 3:
         return parts[0] * 3600 + parts[1] * 60 + parts[2]
     if len(parts) == 2:
@@ -32,7 +38,11 @@ def _parse_duration_text(text: str) -> int:
 
 
 def _parse_relative_time(text: str) -> datetime | None:
-    """Best-effort parse of YouTube relative timestamps like '2 years ago'."""
+    """Best-effort parse of YouTube relative timestamps.
+
+    Handles both regular uploads ("2 years ago") and streams
+    ("Streamed 2 years ago").
+    """
     text = text.lower().strip()
     now = datetime.now(timezone.utc)
     for unit, delta_fn in [
@@ -43,11 +53,14 @@ def _parse_relative_time(text: str) -> datetime | None:
         ("hour", lambda n: timedelta(hours=n)),
     ]:
         if unit in text:
-            try:
-                num = int(text.split()[0])
-                return now - delta_fn(num)
-            except (ValueError, IndexError):
-                return None
+            # Extract the first integer token (skips leading words like "Streamed")
+            for token in text.split():
+                try:
+                    num = int(token)
+                    return now - delta_fn(num)
+                except ValueError:
+                    continue
+            return None
 
     # Support ISO-style dates in fallback mode
     try:
@@ -89,53 +102,73 @@ def _format_duration(seconds: int | None) -> str:
     return f"{minutes}:{secs:02}"
 
 
-def _fetch_channel_videos_with_yt_dlp(channel_url: str) -> list[dict[str, Any]]:
-    """Fallback channel video listing using yt-dlp JSON output."""
-    yt_dlp_bin = shutil.which("yt-dlp") or str(Path(sys.executable).parent / "yt-dlp")
-    try:
-        result = subprocess.run(
-            [
-                yt_dlp_bin,
-                "--no-warnings",
-                "--flat-playlist",
-                "--dump-single-json",
-                channel_url,
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        payload = json.loads(result.stdout)
-    except Exception:
-        return []
+def _fetch_channel_videos_with_yt_dlp(
+    channel_url: str,
+    include_streams: bool = True,
+) -> list[dict[str, Any]]:
+    """Fallback channel video listing using yt-dlp JSON output.
 
-    entries = payload.get("entries", []) or []
-    converted = []
-    for entry in entries:
-        video_id = entry.get("id")
-        title = entry.get("title", "")
-        duration_secs = entry.get("duration")
-        if duration_secs is None:
+    Fetches from both the default videos tab and the live/streams tab.
+    """
+    yt_dlp_bin = shutil.which("yt-dlp") or str(Path(sys.executable).parent / "yt-dlp")
+
+    # The /streams URL surfaces the "Live" tab on YouTube channels.
+    base = channel_url.rstrip("/")
+    urls = [base]
+    if include_streams:
+        urls.append(f"{base}/streams")
+
+    converted: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for url in urls:
+        try:
+            result = subprocess.run(
+                [
+                    yt_dlp_bin,
+                    "--no-warnings",
+                    "--flat-playlist",
+                    "--dump-single-json",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            payload = json.loads(result.stdout)
+        except Exception:
             continue
 
-        upload_date = entry.get("upload_date")
-        published_text = ""
-        if upload_date:
-            try:
-                date = datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
-                published_text = _format_relative_time(date)
-            except ValueError:
-                published_text = upload_date
+        entries = payload.get("entries", []) or []
+        for entry in entries:
+            video_id = entry.get("id")
+            if not video_id or video_id in seen_ids:
+                continue
+            seen_ids.add(video_id)
 
-        converted.append(
-            {
-                "videoId": video_id,
-                "title": {"runs": [{"text": title}]},
-                "lengthText": {"simpleText": _format_duration(duration_secs)},
-                "publishedTimeText": {"simpleText": published_text},
-                "upload_date": upload_date,
-            }
-        )
+            title = entry.get("title", "")
+            duration_secs = entry.get("duration")
+            if duration_secs is None:
+                continue
+
+            upload_date = entry.get("upload_date")
+            published_text = ""
+            if upload_date:
+                try:
+                    date = datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc)
+                    published_text = _format_relative_time(date)
+                except ValueError:
+                    published_text = upload_date
+
+            converted.append(
+                {
+                    "videoId": video_id,
+                    "title": {"runs": [{"text": title}]},
+                    "lengthText": {"simpleText": _format_duration(duration_secs)},
+                    "publishedTimeText": {"simpleText": published_text},
+                    "upload_date": upload_date,
+                }
+            )
     return converted
 
 
@@ -143,6 +176,7 @@ def fetch_video_list(
     skip_uefn: bool = True,
     skip_automotive: bool = True,
     skip_archvis: bool = True,
+    include_streams: bool = True,
 ) -> list[dict[str, Any]]:
     """Return metadata dicts for qualifying videos from the channel.
 
@@ -153,18 +187,37 @@ def fetch_video_list(
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_YEARS * 365)
 
-    # scrapetube yields raw video renderer dicts from the channel page
-    try:
-        raw_videos = list(scrapetube.get_channel(channel_url=CHANNEL_URL, sort_by="newest"))
-    except Exception:
-        raw_videos = []
+    # scrapetube yields raw video renderer dicts from the channel page.
+    # Optionally fetch from the "Live" tab to include past streams.
+    content_types = ["videos"]
+    if include_streams:
+        content_types.append("streams")
+
+    raw_videos: list[dict[str, Any]] = []
+    for content_type in content_types:
+        try:
+            raw_videos.extend(
+                scrapetube.get_channel(
+                    channel_url=CHANNEL_URL,
+                    sort_by="newest",
+                    content_type=content_type,
+                )
+            )
+        except Exception:
+            pass
 
     if not raw_videos:
-        raw_videos = _fetch_channel_videos_with_yt_dlp(CHANNEL_URL)
+        raw_videos = _fetch_channel_videos_with_yt_dlp(
+            CHANNEL_URL, include_streams=include_streams
+        )
 
     results: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
     for v in raw_videos:
         video_id = v.get("videoId", "")
+        if not video_id or video_id in seen_ids:
+            continue
+        seen_ids.add(video_id)
         title_runs = v.get("title", {}).get("runs", [])
         title = title_runs[0]["text"] if title_runs else v.get("title", {}).get("simpleText", "")
 
@@ -191,7 +244,7 @@ def fetch_video_list(
         if not duration_text:
             continue
         duration_secs = _parse_duration_text(duration_text)
-        if duration_secs < MIN_DURATION_SECONDS:
+        if duration_secs is None or duration_secs < MIN_DURATION_SECONDS:
             continue
 
         # Publish date (relative)
@@ -205,8 +258,7 @@ def fetch_video_list(
                 pub_date = None
 
         if pub_date and pub_date < cutoff:
-            # We're iterating newest-first; once we pass the cutoff, stop.
-            break
+            continue
         if pub_date is None:
             # If we can't parse the date, skip to be safe
             continue

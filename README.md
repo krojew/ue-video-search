@@ -5,7 +5,7 @@ Fetches videos from the [Unreal Engine YouTube channel](https://www.youtube.com/
 ## Features
 
 - **YouTube Integration**: Automatically fetches video metadata from Unreal Engine's YouTube channel
-- **Smart Filtering**: Configurable content filters to skip UEFN/Fortnite, automotive, and archvis videos
+- **Smart Filtering**: Configurable content filters to skip UEFN/Fortnite, automotive, and archvis videos; optional inclusion of live streams
 - **GPU-Accelerated Transcription**: Uses OpenAI Whisper with CUDA support for fast transcription
 - **Sentence-Level Segmentation**: Splits transcripts into meaningful sentence chunks for better search results
 - **Vector Search**: Semantic search using Qdrant vector database and Ollama embeddings
@@ -108,6 +108,7 @@ python main.py ingest --reindex
 
 # Control content filtering during ingest
 python main.py ingest --no-skip-automotive  # Include automotive videos
+python main.py ingest --no-include-streams  # Exclude live streams
 ```
 
 #### Search videos

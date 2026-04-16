@@ -651,6 +651,56 @@
     if (data.phase === 'done') loadStats();
   }
 
+  // ── SSE stream management ──
+  let activeEs = null;
+  let reconnectTimer = null;
+
+  function connectToIngestStream() {
+    if (activeEs && activeEs.readyState !== EventSource.CLOSED) return;
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+    const es = new EventSource('/api/ingest/stream');
+    activeEs = es;
+
+    es.addEventListener('status', e => {
+      const data = JSON.parse(e.data);
+      updateIngestUI(data);
+      if (data.phase === 'done' || data.phase === 'error') {
+        es.close();
+        activeEs = null;
+      }
+    });
+
+    es.addEventListener('ping', () => {});
+
+    es.onerror = () => {
+      es.close();
+      activeEs = null;
+      // Check if ingest is still running before reconnecting
+      reconnectTimer = setTimeout(async () => {
+        try {
+          const r = await fetch('/api/ingest/status');
+          const data = await r.json();
+          updateIngestUI(data);
+          if (!['idle', 'done', 'error'].includes(data.phase)) {
+            connectToIngestStream();
+          }
+        } catch (_) {}
+      }, 2000);
+    };
+  }
+
+  async function checkAndReconnect() {
+    try {
+      const r = await fetch('/api/ingest/status');
+      const data = await r.json();
+      updateIngestUI(data);
+      if (!['idle', 'done', 'error'].includes(data.phase)) {
+        connectToIngestStream();
+      }
+    } catch (_) {}
+  }
+
   async function startIngest(incremental) {
     ingestLog.innerHTML = '';
     ingestMessage.textContent = '';
@@ -683,50 +733,21 @@
       return;
     }
 
-    const es = new EventSource('/api/ingest/stream');
-    let connectionLost = false;
-
-    es.addEventListener('status', e => {
-      const data = JSON.parse(e.data);
-      updateIngestUI(data);
-      if (data.phase === 'done' || data.phase === 'error') {
-        es.close();
-      }
-    });
-
-    es.addEventListener('ping', () => {
-      // Keepalive received, connection is still active
-    });
-
-    es.onerror = (event) => {
-      if (!connectionLost) {
-        connectionLost = true;
-        es.close();
-        phaseLabel.textContent = 'Connection lost';
-        phaseDot.classList.add('error');
-        ingestMessage.textContent = 'Lost connection to ingest service. Please check the server logs for details.';
-        btnFull.disabled = false;
-        btnUpdate.disabled = false;
-      }
-    };
-
-    // Set a timeout to detect if the ingest takes too long without updates
-    setTimeout(() => {
-      if (es.readyState !== EventSource.CLOSED && !connectionLost) {
-        es.close();
-        phaseLabel.textContent = 'Timeout';
-        phaseDot.classList.add('error');
-        ingestMessage.textContent = 'Ingest operation timed out. Please try again.';
-        btnFull.disabled = false;
-        btnUpdate.disabled = false;
-      }
-    }, 600000);
+    connectToIngestStream();
   }
 
   btnFull.addEventListener('click', () => startIngest(false));
   btnUpdate.addEventListener('click', () => startIngest(true));
 
-  fetch('/api/ingest/status').then(r => r.json()).then(updateIngestUI).catch(() => {});
+  // Reconnect when switching to the ingest tab
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      if (tab.dataset.tab === 'ingest') checkAndReconnect();
+    });
+  });
+
+  // Check on page load
+  checkAndReconnect();
 
   // ── Helpers ──
   function escHtml(s) {

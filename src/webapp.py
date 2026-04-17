@@ -14,7 +14,7 @@ from sse_starlette.sse import EventSourceResponse
 from . import ingest_worker
 from .fetcher import load_video_list
 from .search import search_videos
-from .vectordb import get_client, ensure_collection
+from .vectordb import close_client, get_client, ensure_collection
 from .config import COLLECTION_NAME
 
 app = FastAPI(title="UE Video Search", version="1.0.0")
@@ -28,6 +28,11 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return (STATIC_DIR / "index.html").read_text()
+
+
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    close_client()
 
 
 # ── Search API ─────────────────────────────────────────
@@ -148,6 +153,5 @@ async def api_ingest_stream():
             ingest_worker.unsubscribe(queue)
 
     return EventSourceResponse(event_generator())
-
 
 

@@ -7,6 +7,7 @@ to an asyncio.Queue so the web layer can stream them via SSE.
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
 import traceback
 from dataclasses import dataclass, field
@@ -62,6 +63,7 @@ _lock = threading.Lock()
 _event_queues: list[asyncio.Queue] = []
 _event_loop: asyncio.AbstractEventLoop | None = None
 _running = False
+_QUEUE_MAXSIZE = 8
 
 
 def get_status() -> dict[str, Any]:
@@ -75,7 +77,7 @@ def is_running() -> bool:
 
 def subscribe() -> asyncio.Queue:
     """Create a new SSE subscriber queue."""
-    q: asyncio.Queue = asyncio.Queue()
+    q: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
     with _lock:
         _event_queues.append(q)
     return q
@@ -94,9 +96,22 @@ def _emit(status: IngestStatus) -> None:
         for q in _event_queues:
             try:
                 if _event_loop and not _event_loop.is_closed():
-                    _event_loop.call_soon_threadsafe(q.put_nowait, data)
+                    _event_loop.call_soon_threadsafe(_push_latest, q, data)
             except Exception:
                 pass
+
+
+def _push_latest(q: asyncio.Queue, data: dict[str, Any]) -> None:
+    """Keep only the most recent status events for slow SSE subscribers."""
+    while True:
+        try:
+            q.put_nowait(data)
+            return
+        except asyncio.QueueFull:
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                return
 
 
 def _run_ingest(
@@ -109,6 +124,7 @@ def _run_ingest(
 ) -> None:
     """Blocking ingest function meant to run in a thread."""
     global _running, _status
+    model: whisper.Whisper | None = None
     _running = True
     _status = IngestStatus(phase=IngestPhase.FETCHING, message="Fetching video list from YouTube...")
     _emit(_status)
@@ -223,6 +239,11 @@ def _run_ingest(
         _status.message = f"Ingest error: {e}\n{traceback.format_exc()}"
         _emit(_status)
     finally:
+        if model is not None:
+            del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         _running = False
 
 

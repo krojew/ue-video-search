@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 from typing import Any
 
 import torch
@@ -81,6 +82,7 @@ def _ingest_videos(
     label: str = "Processing videos",
 ) -> None:
     """Shared ingest logic: transcribe, embed, store a list of videos."""
+    model: whisper.Whisper | None = None
     if not videos:
         console.print("[yellow]No videos to process.[/yellow]")
         return
@@ -103,44 +105,51 @@ def _ingest_videos(
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     console.print(f"\n[bold]Loading Whisper model ({WHISPER_MODEL}) on {device}...[/bold]")
-    model = whisper.load_model(WHISPER_MODEL, device=device)
+    try:
+        model = whisper.load_model(WHISPER_MODEL, device=device)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task(label, total=len(to_process))
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(label, total=len(to_process))
 
-        for video in to_process:
-            vid = video["video_id"]
-            title = video["title"]
-            url = video["url"]
+            for video in to_process:
+                vid = video["video_id"]
+                title = video["title"]
+                url = video["url"]
 
-            progress.update(task, description=f"[cyan]{title[:60]}[/cyan]")
+                progress.update(task, description=f"[cyan]{title[:60]}[/cyan]")
 
-            try:
-                # 1. Download audio + transcribe
-                segments = process_video(vid, url, model=model)
-                if not segments:
-                    console.print(f"  [yellow]No segments for {vid}, skipping.[/yellow]")
-                    progress.update(task, advance=1)
-                    continue
+                try:
+                    # 1. Download audio + transcribe
+                    segments = process_video(vid, url, model=model)
+                    if not segments:
+                        console.print(f"  [yellow]No segments for {vid}, skipping.[/yellow]")
+                        progress.update(task, advance=1)
+                        continue
 
-                # 2. Generate embeddings from the sentence-level transcript
-                texts = [seg["text"] for seg in segments]
-                embeddings = embed_texts(texts)
+                    # 2. Generate embeddings from the sentence-level transcript
+                    texts = [seg["text"] for seg in segments]
+                    embeddings = embed_texts(texts)
 
-                # 3. Store in Qdrant
-                count = upsert_chunks(vid, title, url, segments, embeddings, client)
-                console.print(f"  [green]✓ {title[:60]} — {count} chunks indexed[/green]")
+                    # 3. Store in Qdrant
+                    count = upsert_chunks(vid, title, url, segments, embeddings, client)
+                    console.print(f"  [green]✓ {title[:60]} — {count} chunks indexed[/green]")
 
-            except Exception as e:
-                console.print(f"  [red]✗ {title[:60]} — {e}[/red]")
+                except Exception as e:
+                    console.print(f"  [red]✗ {title[:60]} — {e}[/red]")
 
-            progress.update(task, advance=1)
+                progress.update(task, advance=1)
+    finally:
+        if model is not None:
+            del model
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     console.print("\n[bold green]Ingest complete.[/bold green]")
 

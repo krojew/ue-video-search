@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import uuid
 from typing import Any
 
@@ -18,8 +19,28 @@ from qdrant_client.models import (
 from .config import COLLECTION_NAME, EMBEDDING_DIM, QDRANT_HOST, QDRANT_PORT
 
 
+_client: QdrantClient | None = None
+
+
 def get_client() -> QdrantClient:
-    return QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=300)
+    global _client
+    if _client is None:
+        _client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=300)
+    return _client
+
+
+def close_client() -> None:
+    global _client
+    if _client is None:
+        return
+    client = _client
+    close = getattr(client, "close", None)
+    if callable(close):
+        close()
+    _client = None
+
+
+atexit.register(close_client)
 
 
 def ensure_collection(client: QdrantClient | None = None) -> None:

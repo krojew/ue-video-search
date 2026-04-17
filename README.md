@@ -22,6 +22,8 @@ Fetches videos from the [Unreal Engine YouTube channel](https://www.youtube.com/
 
 ## Quick Start with Docker
 
+Visit [Docker Hub](https://hub.docker.com/r/krojew/ue-video-search) or:
+
 ```bash
 # 1. Clone the repository
 git clone <repository-url>
@@ -71,7 +73,7 @@ All settings can be configured via environment variables. Create a `.env` file o
 | `MIN_DURATION_SECONDS` | `900` | Minimum video duration in seconds (15 minutes) |
 | `WHISPER_MODEL` | `base` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `EMBEDDING_MODEL` | `qwen3-embedding` | Ollama embedding model name |
+| `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | Ollama embedding model name |
 | `EMBEDDING_DIM` | `4096` | Embedding vector dimensions |
 | `QDRANT_HOST` | `localhost` | Qdrant server hostname |
 | `QDRANT_PORT` | `6333` | Qdrant server port |

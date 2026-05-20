@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-import whisper
+from faster_whisper import WhisperModel
 
 from .config import (
     AUDIO_DIR,
@@ -115,7 +115,17 @@ def _window_segments(
     return chunks
 
 
-def transcribe_audio(audio_path: Path, model: whisper.Whisper | None = None) -> list[dict[str, Any]]:
+def load_whisper_model() -> WhisperModel:
+    """Load Whisper using the best device + compute_type for the current host.
+
+    CUDA gets float16; CPU gets int8 (CTranslate2 quantizes at load time).
+    """
+    if torch.cuda.is_available():
+        return WhisperModel(WHISPER_MODEL, device="cuda", compute_type="float16")
+    return WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+
+
+def transcribe_audio(audio_path: Path, model: WhisperModel | None = None) -> list[dict[str, Any]]:
     """Transcribe an audio file and return a list of windowed chunks.
 
     Each chunk dict has keys: start, end, text. Chunks are produced by sliding
@@ -124,21 +134,20 @@ def transcribe_audio(audio_path: Path, model: whisper.Whisper | None = None) -> 
     Whisper's own — not interpolated.
     """
     if model is None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = whisper.load_model(WHISPER_MODEL, device=device)
+        model = load_whisper_model()
 
-    result = model.transcribe(
+    segments_iter, _info = model.transcribe(
         str(audio_path),
-        verbose=False,
-        word_timestamps=False,
         language="en",
         initial_prompt=_WHISPER_PROMPT,
+        word_timestamps=False,
+        vad_filter=True,
     )
 
     raw_segments = [
-        {"start": float(s["start"]), "end": float(s["end"]), "text": s["text"].strip()}
-        for s in result.get("segments", [])
-        if s.get("text", "").strip()
+        {"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
+        for s in segments_iter
+        if s.text.strip()
     ]
     if not raw_segments:
         return []
@@ -162,7 +171,7 @@ def load_transcript(video_id: str) -> list[dict[str, Any]] | None:
     return json.loads(path.read_text())
 
 
-def process_video(video_id: str, url: str, model: whisper.Whisper | None = None) -> list[dict[str, Any]]:
+def process_video(video_id: str, url: str, model: WhisperModel | None = None) -> list[dict[str, Any]]:
     """Full pipeline: download audio → transcribe → save. Returns segments."""
     existing = load_transcript(video_id)
     if existing is not None:

@@ -6,14 +6,14 @@ import gc
 from typing import Any
 
 import torch
-import whisper
+from faster_whisper import WhisperModel
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 
 from .config import WHISPER_MODEL
 from .embeddings import build_chunk_embed_text, embed_texts
 from .fetcher import fetch_video_list, load_video_list, merge_video_lists, save_video_list
-from .transcriber import process_video
+from .transcriber import load_whisper_model, process_video
 from .vectordb import ensure_collection, get_client, list_indexed_video_ids, upsert_chunks
 
 console = Console()
@@ -82,7 +82,7 @@ def _ingest_videos(
     label: str = "Processing videos",
 ) -> None:
     """Shared ingest logic: transcribe, embed, store a list of videos."""
-    model: whisper.Whisper | None = None
+    model: WhisperModel | None = None
     if not videos:
         console.print("[yellow]No videos to process.[/yellow]")
         return
@@ -108,7 +108,7 @@ def _ingest_videos(
 
     console.print(f"\n[bold]Loading Whisper model ({WHISPER_MODEL}) on {device}...[/bold]")
     try:
-        model = whisper.load_model(WHISPER_MODEL, device=device)
+        model = load_whisper_model()
 
         with Progress(
             SpinnerColumn(),

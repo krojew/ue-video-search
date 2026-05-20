@@ -15,12 +15,12 @@ from enum import Enum
 from typing import Any
 
 import torch
-import whisper
+from faster_whisper import WhisperModel
 
 from .config import WHISPER_MODEL
 from .embeddings import build_chunk_embed_text, embed_texts
 from .fetcher import fetch_video_list, load_video_list, merge_video_lists, save_video_list
-from .transcriber import process_video
+from .transcriber import load_whisper_model, process_video
 from .vectordb import ensure_collection, get_client, list_indexed_video_ids, upsert_chunks
 
 
@@ -124,7 +124,7 @@ def _run_ingest(
 ) -> None:
     """Blocking ingest function meant to run in a thread."""
     global _running, _status
-    model: whisper.Whisper | None = None
+    model: WhisperModel | None = None
     _running = True
     _status = IngestStatus(phase=IngestPhase.FETCHING, message="Fetching video list from YouTube...")
     _emit(_status)
@@ -188,7 +188,7 @@ def _run_ingest(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         _status.message = f"Loading Whisper model ({WHISPER_MODEL}) on {device}..."
         _emit(_status)
-        model = whisper.load_model(WHISPER_MODEL, device=device)
+        model = load_whisper_model()
 
         # ── Process ──
         _status.phase = IngestPhase.PROCESSING

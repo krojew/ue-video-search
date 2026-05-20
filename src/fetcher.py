@@ -116,7 +116,15 @@ def _fetch_channel_videos_with_yt_dlp(
 
     Fetches from both the default videos tab and the live/streams tab.
     """
-    yt_dlp_bin = shutil.which("yt-dlp") or str(Path(sys.executable).parent / "yt-dlp")
+    # Prefer the installed `yt-dlp` console script; fall back to the package's
+    # __main__ via the running interpreter. The latter works even when the
+    # script directory is not on PATH (common on Windows pip --user installs).
+    yt_dlp_cmd: list[str]
+    yt_dlp_path = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
+    if yt_dlp_path:
+        yt_dlp_cmd = [yt_dlp_path]
+    else:
+        yt_dlp_cmd = [sys.executable, "-m", "yt_dlp"]
 
     # Drill into the per-tab URLs. yt-dlp on a bare channel URL returns
     # a playlist of tabs (Videos/Live/Shorts) rather than videos themselves,
@@ -133,7 +141,7 @@ def _fetch_channel_videos_with_yt_dlp(
         try:
             result = subprocess.run(
                 [
-                    yt_dlp_bin,
+                    *yt_dlp_cmd,
                     "--no-warnings",
                     "--flat-playlist",
                     "--dump-single-json",

@@ -22,9 +22,9 @@ from .config import (
 
 
 def download_audio(video_id: str, url: str) -> Path:
-    """Download audio-only stream via yt-dlp. Returns path to the wav file."""
+    """Download audio-only stream via yt-dlp. Returns path to the audio file."""
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = AUDIO_DIR / f"{video_id}.wav"
+    out_path = AUDIO_DIR / f"{video_id}.opus"
     if out_path.exists():
         return out_path
 
@@ -33,14 +33,16 @@ def download_audio(video_id: str, url: str) -> Path:
     if yt_dlp_bin is None:
         yt_dlp_bin = str(Path(sys.executable).parent / "yt-dlp")
 
-    # Download as wav 16kHz mono — optimal for Whisper
+    # YouTube serves audio as opus, so --audio-format opus is a no-op repack
+    # rather than a transcode. Skipping the WAV resample to 16 kHz mono saves
+    # bandwidth (~10x smaller files) and ffmpeg time; Whisper resamples
+    # internally on load.
     subprocess.run(
         [
             yt_dlp_bin,
             "--no-playlist",
             "-x",
-            "--audio-format", "wav",
-            "--postprocessor-args", "ffmpeg:-ar 16000 -ac 1",
+            "--audio-format", "opus",
             "-o", out_path,
             url,
         ],
@@ -166,7 +168,7 @@ def process_video(video_id: str, url: str, model: whisper.Whisper | None = None)
     if existing is not None:
         return existing
 
-    audio_path = AUDIO_DIR / f"{video_id}.wav"
+    audio_path = AUDIO_DIR / f"{video_id}.opus"
     audio_existed = audio_path.exists()
     audio_path = download_audio(video_id, url)
     segments = transcribe_audio(audio_path, model=model)

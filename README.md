@@ -74,7 +74,7 @@ All settings can be configured via environment variables. Create a `.env` file o
 | `WHISPER_MODEL` | `small` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | Ollama embedding model name |
-| `EMBEDDING_DIM` | `4096` | Embedding vector dimensions |
+| `EMBEDDING_DIM` | `1024` | Embedding vector dimensions (must match the chosen model) |
 | `QDRANT_HOST` | `localhost` | Qdrant server hostname |
 | `QDRANT_PORT` | `6333` | Qdrant server port |
 | `COLLECTION_NAME` | `ue_videos` | Qdrant collection name |

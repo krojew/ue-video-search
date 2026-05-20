@@ -75,6 +75,8 @@ All settings can be configured via environment variables. Create a `.env` file o
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | Ollama embedding model name |
 | `EMBEDDING_DIM` | `1024` | Embedding vector dimensions (must match the chosen model) |
+| `EMBEDDING_QUERY_INSTRUCTION` | *(UE-specific default)* | Task instruction injected into the query side of asymmetric retrieval models |
+| `EMBEDDING_QUERY_TEMPLATE` | `Instruct: {instruction}\nQuery: {query}` | Format used to wrap queries. Receives `{instruction}` and `{query}`. Set to `{query}` to disable wrapping for models that don't use a query template |
 | `QDRANT_HOST` | `localhost` | Qdrant server hostname |
 | `QDRANT_PORT` | `6333` | Qdrant server port |
 | `COLLECTION_NAME` | `ue_videos` | Qdrant collection name |

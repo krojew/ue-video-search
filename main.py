@@ -104,6 +104,36 @@ def ingest(
     )
 
 @cli.command()
+def purge() -> None:
+    """Remove indexed videos that are no longer in the cached video list.
+
+    After tightening filters or shrinking MAX_AGE_YEARS, the on-disk video
+    list shrinks but Qdrant keeps every previously-indexed video. Running
+    this command drops the orphaned chunks so they stop appearing in
+    search results.
+    """
+    from src.fetcher import load_video_list
+    from src.vectordb import purge_videos_outside
+
+    cached = load_video_list()
+    if not cached:
+        console.print("[yellow]No cached video list found. Run `fetch` first.[/yellow]")
+        return
+
+    allowed = {v["video_id"] for v in cached}
+    videos_purged, points_purged = purge_videos_outside(allowed)
+
+    if videos_purged == 0:
+        console.print("[dim]Nothing to purge — index already in sync with the cached video list.[/dim]")
+        return
+
+    console.print(
+        f"[green]Purged {videos_purged} video(s) ({points_purged} chunks) "
+        f"that were no longer in the cached list.[/green]"
+    )
+
+
+@cli.command()
 @click.argument("query")
 @click.option("--top-k", default=10, help="Number of results to return.")
 def search(query: str, top_k: int) -> None:

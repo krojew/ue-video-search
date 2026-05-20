@@ -11,6 +11,8 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    FilterSelector,
+    MatchAny,
     MatchValue,
     PointStruct,
     VectorParams,
@@ -112,6 +114,73 @@ def video_already_indexed(video_id: str, client: QdrantClient | None = None) -> 
         return len(result[0]) > 0
     except Exception:
         return False
+
+
+
+def list_indexed_video_ids(client: QdrantClient | None = None) -> set[str]:
+    """Return the set of distinct video_ids currently present in the collection."""
+    client = client or get_client()
+    try:
+        collections = [c.name for c in client.get_collections().collections]
+    except Exception:
+        return set()
+    if COLLECTION_NAME not in collections:
+        return set()
+
+    ids: set[str] = set()
+    offset: Any = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=None,
+            limit=10_000,
+            with_payload=["video_id"],
+            with_vectors=False,
+            offset=offset,
+        )
+        for p in points:
+            vid = (p.payload or {}).get("video_id")
+            if vid:
+                ids.add(vid)
+        if offset is None:
+            break
+    return ids
+
+
+def purge_videos_outside(
+    allowed_ids: set[str],
+    client: QdrantClient | None = None,
+) -> tuple[int, int]:
+    """Delete points whose video_id is not in `allowed_ids`.
+
+    Returns (videos_purged, points_purged). A safety guard refuses to purge
+    when allowed_ids is empty — that would wipe the whole collection, which
+    is almost never what a stale-cleanup caller intends.
+    """
+    if not allowed_ids:
+        return (0, 0)
+
+    client = client or get_client()
+    indexed_ids = list_indexed_video_ids(client)
+    stale_ids = indexed_ids - allowed_ids
+    if not stale_ids:
+        return (0, 0)
+
+    stale_filter = Filter(
+        must=[FieldCondition(key="video_id", match=MatchAny(any=list(stale_ids)))]
+    )
+    points_purged = client.count(
+        collection_name=COLLECTION_NAME,
+        count_filter=stale_filter,
+        exact=True,
+    ).count
+
+    client.delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=FilterSelector(filter=stale_filter),
+    )
+
+    return (len(stale_ids), points_purged)
 
 
 def search(

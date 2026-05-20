@@ -120,6 +120,13 @@ python main.py search "nanite virtual geometry"
 python main.py search "blueprint networking" --top-k 5
 ```
 
+#### Purge stale videos
+```bash
+# Remove videos from the index that are no longer in the cached list
+# (e.g. after tightening filters or shrinking MAX_AGE_YEARS)
+python main.py purge
+```
+
 #### Interactive search
 ```bash
 python main.py interactive

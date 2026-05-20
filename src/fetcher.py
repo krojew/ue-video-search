@@ -118,9 +118,11 @@ def _fetch_channel_videos_with_yt_dlp(
     """
     yt_dlp_bin = shutil.which("yt-dlp") or str(Path(sys.executable).parent / "yt-dlp")
 
-    # The /streams URL surfaces the "Live" tab on YouTube channels.
+    # Drill into the per-tab URLs. yt-dlp on a bare channel URL returns
+    # a playlist of tabs (Videos/Live/Shorts) rather than videos themselves,
+    # so the /videos and /streams suffixes are required to enumerate items.
     base = channel_url.rstrip("/")
-    urls = [base]
+    urls = [f"{base}/videos"]
     if include_streams:
         urls.append(f"{base}/streams")
 

@@ -46,6 +46,18 @@ def embed_query(query: str, instruction: str | None = None) -> list[float]:
     return embed_text(formatted)
 
 
+
+def build_chunk_embed_text(title: str, chunk_text: str) -> str:
+    """Compose the text to embed for a transcript chunk.
+
+    Prepending the video title anchors the chunk's embedding to the video's
+    actual subject. Without this, a five-second tangential mention of a topic
+    in an unrelated video can outrank a chunk from a video whose whole
+    subject is that topic but whose speaker uses synonyms.
+    """
+    return f"{title}\n\n{chunk_text}"
+
+
 def embed_texts(texts: list[str], batch_size: int = 32) -> list[list[float]]:
     """Embed multiple texts, batching requests to Ollama."""
     all_embeddings: list[list[float]] = []

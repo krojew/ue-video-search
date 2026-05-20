@@ -18,7 +18,7 @@ import torch
 import whisper
 
 from .config import WHISPER_MODEL
-from .embeddings import embed_texts
+from .embeddings import build_chunk_embed_text, embed_texts
 from .fetcher import fetch_video_list, load_video_list, merge_video_lists, save_video_list
 from .transcriber import process_video
 from .vectordb import ensure_collection, get_client, upsert_chunks, video_already_indexed
@@ -210,7 +210,7 @@ def _run_ingest(
                     _emit(_status)
                     continue
 
-                texts = [seg["text"] for seg in segments]
+                texts = [build_chunk_embed_text(title, seg["text"]) for seg in segments]
                 embeddings = embed_texts(texts)
                 count = upsert_chunks(vid, title, url, segments, embeddings, client)
 

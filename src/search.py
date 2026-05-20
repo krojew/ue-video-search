@@ -60,16 +60,50 @@ def _cap_per_video(results: list[dict[str, Any]], max_per_video: int) -> list[di
     return out
 
 
+_STOP_WORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "and", "or", "but", "nor", "so", "yet", "as", "if",
+    "in", "on", "at", "to", "for", "of", "from", "with", "by", "about",
+    "into", "onto", "upon", "over", "under", "between", "through",
+    "is", "are", "was", "were", "be", "been", "being", "am",
+    "have", "has", "had", "having",
+    "do", "does", "did", "doing", "done",
+    "will", "would", "should", "could", "can", "may", "might", "must", "shall",
+    "i", "me", "my", "you", "your", "he", "him", "his", "she", "her", "it", "its",
+    "we", "us", "our", "they", "them", "their",
+    "this", "that", "these", "those",
+    "what", "which", "who", "whom", "when", "where", "why", "how",
+    "all", "any", "some", "no", "not", "only", "same", "than", "too", "very",
+    "just", "also", "more", "most", "much", "many", "few",
+    "use", "using", "used", "make", "making", "made",
+    "get", "got", "getting", "let", "lets",
+    "tutorial", "tutorials", "guide", "intro", "video", "part",
+})
+
+_TECH_ACRONYMS: frozenset[str] = frozenset({
+    "ue", "ue4", "ue5", "ai", "ar", "vr", "xr", "gi", "ml",
+    "ui", "ux", "ik", "fk", "io", "os", "fov", "fps",
+    "lod", "hlod", "pcg", "bsp", "hud", "gpu", "cpu",
+    "sdf", "rtx", "api", "sdk", "vfx", "sfx",
+    "rgb", "hdr", "png", "jpg", "fbx", "tga",
+})
+
+
 def _extract_keywords(text: str) -> set[str]:
-    """Extract significant keywords from text (lowercased, minimum 3 chars)."""
-    # Remove common words
-    stop_words = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "from", "with", "by"}
+    """Extract significant keywords from text for title-boost matching.
 
-    # Extract words (alphanumeric and hyphens)
-    words = re.findall(r'\b\w+\b', text.lower())
-
-    # Filter: >= 3 chars and not stop words
-    keywords = {w for w in words if len(w) >= 3 and w not in stop_words}
+    - Allows internal hyphens so "real-time" / "post-process" stay intact.
+    - Drops a wide list of high-frequency English words that would otherwise
+      cause every "How to ..." tutorial title to match every query.
+    - Allows short UE-relevant acronyms (UE5, AI, AR, VR, ML, GI, IK, FK,
+      LOD, PCG, GPU, etc.) that the >=3-char filter would otherwise drop.
+    """
+    tokens = re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", text.lower())
+    keywords: set[str] = set()
+    for tok in tokens:
+        if tok in _STOP_WORDS:
+            continue
+        if len(tok) >= 3 or tok in _TECH_ACRONYMS:
+            keywords.add(tok)
     return keywords
 
 

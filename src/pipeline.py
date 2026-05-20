@@ -14,7 +14,7 @@ from .config import WHISPER_MODEL
 from .embeddings import build_chunk_embed_text, embed_texts
 from .fetcher import fetch_video_list, load_video_list, merge_video_lists, save_video_list
 from .transcriber import process_video
-from .vectordb import ensure_collection, get_client, upsert_chunks, video_already_indexed
+from .vectordb import ensure_collection, get_client, list_indexed_video_ids, upsert_chunks
 
 console = Console()
 
@@ -90,9 +90,11 @@ def _ingest_videos(
     client = get_client()
     ensure_collection(client)
 
-    # Pre-filter already-indexed videos to avoid loading Whisper unnecessarily
+    # Pre-filter already-indexed videos to avoid loading Whisper unnecessarily.
+    # Fetch the indexed-id set in one scroll instead of one round-trip per video.
     if skip_indexed:
-        to_process = [v for v in videos if not video_already_indexed(v["video_id"], client)]
+        indexed_ids = list_indexed_video_ids(client)
+        to_process = [v for v in videos if v["video_id"] not in indexed_ids]
         skipped = len(videos) - len(to_process)
         if skipped:
             console.print(f"[dim]Skipping {skipped} already-indexed video(s).[/dim]")

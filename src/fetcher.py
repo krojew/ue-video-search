@@ -137,6 +137,12 @@ def _fetch_channel_videos_with_yt_dlp(
                     "--no-warnings",
                     "--flat-playlist",
                     "--dump-single-json",
+                    # `approximate_date` populates the per-entry `timestamp`
+                    # field during a flat-playlist scrape. Without it,
+                    # upload dates are only available via per-video extraction
+                    # (~1s/video).
+                    "--extractor-args",
+                    "youtubetab:approximate_date",
                     url,
                 ],
                 capture_output=True,
@@ -164,6 +170,15 @@ def _fetch_channel_videos_with_yt_dlp(
                 continue
 
             upload_date = entry.get("upload_date")
+            timestamp = entry.get("timestamp")
+            if not upload_date and timestamp is not None:
+                try:
+                    upload_date = datetime.fromtimestamp(
+                        timestamp, tz=timezone.utc
+                    ).strftime("%Y%m%d")
+                except (OverflowError, OSError, ValueError):
+                    upload_date = None
+
             published_text = ""
             if upload_date:
                 try:

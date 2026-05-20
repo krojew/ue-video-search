@@ -219,7 +219,10 @@ def fetch_video_list(
             continue
         seen_ids.add(video_id)
         title_runs = v.get("title", {}).get("runs", [])
-        title = title_runs[0]["text"] if title_runs else v.get("title", {}).get("simpleText", "")
+        if title_runs:
+            title = "".join(run.get("text", "") for run in title_runs)
+        else:
+            title = v.get("title", {}).get("simpleText", "")
 
         title_lower = title.lower()
 

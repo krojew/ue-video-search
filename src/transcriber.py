@@ -50,6 +50,14 @@ def download_audio(video_id: str, url: str) -> Path:
     return out_path
 
 
+_WHISPER_PROMPT = (
+    "Unreal Engine 5 tutorial. Topics include Nanite, Lumen, Niagara, Chaos, "
+    "MetaHuman, MetaSounds, Megalights, World Partition, Geometry Script, PCG, "
+    "Substrate, Blueprints, C++, materials, shaders, ray tracing, GPU, LOD, "
+    "BSP, HLOD, post-process, virtual shadow maps, path tracing."
+)
+
+
 def _window_segments(
     segments: list[dict[str, Any]],
     target_duration: float,
@@ -121,6 +129,8 @@ def transcribe_audio(audio_path: Path, model: whisper.Whisper | None = None) -> 
         str(audio_path),
         verbose=False,
         word_timestamps=False,
+        language="en",
+        initial_prompt=_WHISPER_PROMPT,
     )
 
     raw_segments = [

@@ -71,7 +71,7 @@ All settings can be configured via environment variables. Create a `.env` file o
 | `CHANNEL_URL` | `https://www.youtube.com/unrealengine` | YouTube channel URL to fetch videos from |
 | `MAX_AGE_YEARS` | `3` | Only fetch videos from the last N years |
 | `MIN_DURATION_SECONDS` | `900` | Minimum video duration in seconds (15 minutes) |
-| `WHISPER_MODEL` | `base` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) |
+| `WHISPER_MODEL` | `small` | Whisper model size (`tiny`/`base`/`small`/`medium`/`large`) |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `EMBEDDING_MODEL` | `qwen3-embedding:0.6b` | Ollama embedding model name |
 | `EMBEDDING_DIM` | `4096` | Embedding vector dimensions |

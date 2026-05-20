@@ -18,7 +18,7 @@ MAX_AGE_YEARS = int(os.environ.get("MAX_AGE_YEARS", "3"))
 MIN_DURATION_SECONDS = int(os.environ.get("MIN_DURATION_SECONDS", str(15 * 60)))
 
 # ── Whisper ────────────────────────────────────────────
-WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "base")
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 
 # ── Ollama ─────────────────────────────────────────────
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")

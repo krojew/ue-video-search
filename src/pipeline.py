@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import gc
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import torch
@@ -13,7 +14,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from .config import WHISPER_MODEL
 from .embeddings import build_chunk_embed_text, embed_texts
 from .fetcher import fetch_video_list, load_video_list, merge_video_lists, save_video_list
-from .transcriber import load_whisper_model, process_video
+from .transcriber import download_audio, load_transcript, load_whisper_model, process_video
 from .vectordb import ensure_collection, get_client, list_indexed_video_ids, upsert_chunks
 
 console = Console()
@@ -76,6 +77,19 @@ def run_fetch_incremental(
     return merged, new_only
 
 
+def _submit_prefetch(
+    pool: ThreadPoolExecutor, video: dict[str, Any]
+) -> Future[Any] | None:
+    """Queue an audio download for `video` if it is not already cached.
+
+    Returns None when the transcript already exists, since process_video
+    will short-circuit and the audio would never be read.
+    """
+    if load_transcript(video["video_id"]) is not None:
+        return None
+    return pool.submit(download_audio, video["video_id"], video["url"])
+
+
 def _ingest_videos(
     videos: list[dict[str, Any]],
     skip_indexed: bool = True,
@@ -116,18 +130,40 @@ def _ingest_videos(
             BarColumn(),
             TaskProgressColumn(),
             console=console,
-        ) as progress:
+        ) as progress, ThreadPoolExecutor(max_workers=1) as downloader:
             task = progress.add_task(label, total=len(to_process))
 
-            for video in to_process:
+            # Prefetch the first video's audio so transcription can start as
+            # soon as the model is loaded. Subsequent prefetches happen inside
+            # the loop, overlapping with the previous video's transcription.
+            pending: Future[Any] | None = _submit_prefetch(downloader, to_process[0])
+
+            for i, video in enumerate(to_process):
                 vid = video["video_id"]
                 title = video["title"]
                 url = video["url"]
 
                 progress.update(task, description=f"[cyan]{title[:60]}[/cyan]")
 
+                # Snapshot the in-flight future for *this* video before swapping
+                # `pending` to the next one — otherwise we would wait on the
+                # wrong download.
+                current_pending = pending
+                pending = (
+                    _submit_prefetch(downloader, to_process[i + 1])
+                    if i + 1 < len(to_process)
+                    else None
+                )
+
+                if current_pending is not None:
+                    try:
+                        current_pending.result()
+                    except Exception:
+                        pass  # process_video will re-raise from its own download attempt
+
                 try:
-                    # 1. Download audio + transcribe
+                    # 1. Download audio + transcribe (audio is already on disk
+                    #    if the prefetch landed; download_audio short-circuits)
                     segments = process_video(vid, url, model=model)
                     if not segments:
                         console.print(f"  [yellow]No segments for {vid}, skipping.[/yellow]")

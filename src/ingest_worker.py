@@ -10,6 +10,7 @@ import asyncio
 import gc
 import threading
 import traceback
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -20,7 +21,7 @@ from faster_whisper import WhisperModel
 from .config import WHISPER_MODEL
 from .embeddings import build_chunk_embed_text, embed_texts
 from .fetcher import fetch_video_list, load_video_list, merge_video_lists, save_video_list
-from .transcriber import load_whisper_model, process_video
+from .transcriber import download_audio, load_transcript, load_whisper_model, process_video
 from .vectordb import ensure_collection, get_client, list_indexed_video_ids, upsert_chunks
 
 
@@ -114,6 +115,19 @@ def _push_latest(q: asyncio.Queue, data: dict[str, Any]) -> None:
                 return
 
 
+def _submit_prefetch(
+    pool: ThreadPoolExecutor, video: dict[str, Any]
+) -> Future[Any] | None:
+    """Queue an audio download for `video` if it is not already cached.
+
+    Returns None when the transcript already exists, since process_video
+    will short-circuit and the audio would never be read.
+    """
+    if load_transcript(video["video_id"]) is not None:
+        return None
+    return pool.submit(download_audio, video["video_id"], video["url"])
+
+
 def _run_ingest(
     incremental: bool,
     reindex: bool,
@@ -194,36 +208,58 @@ def _run_ingest(
         _status.phase = IngestPhase.PROCESSING
         _emit(_status)
 
-        for video in to_process:
-            vid = video["video_id"]
-            title = video["title"]
-            url = video["url"]
+        with ThreadPoolExecutor(max_workers=1) as downloader:
+            # Prefetch the first video's audio so the worker thread starts
+            # downloading while Whisper is mid-load. Subsequent prefetches
+            # happen inside the loop, overlapping with the previous video's
+            # transcription.
+            pending: Future[Any] | None = _submit_prefetch(downloader, to_process[0])
 
-            _status.current_video = title
-            _status.message = f"Processing: {title[:80]}"
-            _emit(_status)
+            for i, video in enumerate(to_process):
+                vid = video["video_id"]
+                title = video["title"]
+                url = video["url"]
 
-            try:
-                segments = process_video(vid, url, model=model)
-                if not segments:
+                _status.current_video = title
+                _status.message = f"Processing: {title[:80]}"
+                _emit(_status)
+
+                # Snapshot the in-flight future for *this* video before
+                # swapping `pending` to the next one.
+                current_pending = pending
+                pending = (
+                    _submit_prefetch(downloader, to_process[i + 1])
+                    if i + 1 < len(to_process)
+                    else None
+                )
+
+                if current_pending is not None:
+                    try:
+                        current_pending.result()
+                    except Exception:
+                        pass  # process_video will re-raise from its own download attempt
+
+                try:
+                    segments = process_video(vid, url, model=model)
+                    if not segments:
+                        _status.failed += 1
+                        _status.completed += 1
+                        _emit(_status)
+                        continue
+
+                    texts = [build_chunk_embed_text(title, seg["text"]) for seg in segments]
+                    embeddings = embed_texts(texts)
+                    count = upsert_chunks(vid, title, url, segments, embeddings, client)
+
+                    _status.completed += 1
+                    _status.message = f"Indexed: {title[:80]} ({count} chunks)"
+                    _emit(_status)
+
+                except Exception as e:
                     _status.failed += 1
                     _status.completed += 1
+                    _status.message = f"Failed: {title[:60]} — {e}"
                     _emit(_status)
-                    continue
-
-                texts = [build_chunk_embed_text(title, seg["text"]) for seg in segments]
-                embeddings = embed_texts(texts)
-                count = upsert_chunks(vid, title, url, segments, embeddings, client)
-
-                _status.completed += 1
-                _status.message = f"Indexed: {title[:80]} ({count} chunks)"
-                _emit(_status)
-
-            except Exception as e:
-                _status.failed += 1
-                _status.completed += 1
-                _status.message = f"Failed: {title[:60]} — {e}"
-                _emit(_status)
 
         _status.phase = IngestPhase.DONE
         _status.current_video = ""

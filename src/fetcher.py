@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,11 @@ from .config import (
     MAX_AGE_YEARS,
     MIN_DURATION_SECONDS,
 )
+
+
+_UEFN_RE = re.compile(r"\b(uefn|fortnite)\b", re.IGNORECASE)
+_AUTOMOTIVE_RE = re.compile(r"\bautomotive\b", re.IGNORECASE)
+_ARCHVIS_RE = re.compile(r"\barchvi[sz]\b", re.IGNORECASE)
 
 
 def _parse_duration_text(text: str) -> int | None:
@@ -224,16 +230,13 @@ def fetch_video_list(
         else:
             title = v.get("title", {}).get("simpleText", "")
 
-        title_lower = title.lower()
-
-        # Skip Unreal Editor for Fortnite content
-        if skip_uefn and ("uefn" in title_lower or "fortnite" in title_lower):
+        if skip_uefn and _UEFN_RE.search(title):
             continue
 
-        if skip_automotive and "automotive" in title_lower:
+        if skip_automotive and _AUTOMOTIVE_RE.search(title):
             continue
 
-        if skip_archvis and "archvis" in title_lower:
+        if skip_archvis and _ARCHVIS_RE.search(title):
             continue
 
         # Duration

@@ -1,4 +1,4 @@
-# Unreal Engine YouTube Video Search
+# Unreal Engine YouTube Video Search — v2.0
 
 Fetches videos from the [Unreal Engine YouTube channel](https://www.youtube.com/unrealengine), transcribes them with Whisper, generates embeddings via Ollama, stores them in Qdrant, and provides semantic search with timestamped links.
 
@@ -7,11 +7,42 @@ Fetches videos from the [Unreal Engine YouTube channel](https://www.youtube.com/
 - **YouTube Integration**: Automatically fetches video metadata from Unreal Engine's YouTube channel
 - **Smart Filtering**: Configurable content filters to skip UEFN/Fortnite, automotive, and archvis videos; optional inclusion of live streams
 - **GPU-Accelerated Transcription**: Uses OpenAI Whisper with CUDA support for fast transcription
-- **Sentence-Level Segmentation**: Splits transcripts into meaningful sentence chunks for better search results
-- **Vector Search**: Semantic search using Qdrant vector database and Ollama embeddings
+- **Windowed Chunking**: 2-minute overlapping windows preserve topical context for semantic search, with native Whisper timestamps for accurate jump-to-moment links
+- **Title-Anchored Embeddings**: Each chunk is embedded with its video title prepended so retrieval reflects the video's actual subject, not just incidental keyword mentions
+- **Asymmetric Retrieval**: Query-side instruction prefix (Qwen3-style by default; configurable for BGE/E5/etc.) so queries and documents share an embedding space
+- **Vector Search**: Semantic search using Qdrant vector database and Ollama embeddings, with title-keyword reranking, adjacent-chunk merging, and per-video diversity caps
 - **Web Interface**: Modern web UI for searching and managing video ingestion
 - **Docker Support**: Complete containerized setup with GPU support
 - **CLI Tools**: Command-line interface for all operations
+
+## Upgrading from v1.x
+
+v2.0 changes how transcripts are chunked, what gets embedded, and how queries are formatted before retrieval. None of the v2.0 fixes will improve search results on a v1.x index — re-ingest is required.
+
+What changed at the data layer:
+
+- Transcripts are now produced as 2-minute overlapping windows instead of single-sentence segments. Old cached transcripts in `data/transcripts/*.json` are in the v1 sentence format; they short-circuit transcription if present, so they must be deleted to pick up the new windowing, the language pin, the UE-jargon glossary, and the upgraded default Whisper model (`base` → `small`).
+- Document embeddings now include the video title (`"{title}\n\n{chunk}"`). v1 embeddings were transcript-only and won't benefit from title anchoring.
+- Qdrant point IDs are derived from `(video_id, start_seconds)`. Because v2 chunks have different start times than v1 sentence chunks, re-ingesting on top of a v1 collection leaves the old chunks in place — the collection should be dropped first.
+- YouTube titles are now read from every `runs[]` entry, so titles previously truncated mid-string will only be fixed for re-fetched videos.
+
+Migration steps:
+
+```powershell
+# 1. Drop the Qdrant collection (old v1 chunks have different IDs and would linger)
+Invoke-RestMethod -Method Delete http://localhost:6333/collections/ue_videos
+
+# 2. Delete cached transcripts so the new Whisper settings re-run
+Remove-Item -Recurse -Force data/transcripts
+
+# 3. Re-fetch so titles are captured with the multi-run fix and filters re-applied
+python main.py fetch --refresh
+
+# 4. Re-ingest from scratch
+python main.py ingest
+```
+
+The bundled snapshot in `snapshots/` is also a v1 artifact and will not reflect the v2.0 improvements — regenerate it after re-ingest if you redistribute it.
 
 ## Prerequisites
 

@@ -64,7 +64,7 @@ def build_chunk_embed_text(title: str, chunk_text: str) -> str:
     return f"{title}\n\n{chunk_text}"
 
 
-def embed_texts(texts: list[str], batch_size: int = 32) -> list[list[float]]:
+def embed_texts(texts: list[str], batch_size: int = 128) -> list[list[float]]:
     """Embed multiple texts, batching requests to Ollama."""
     all_embeddings: list[list[float]] = []
     for i in range(0, len(texts), batch_size):

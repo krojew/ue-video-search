@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -13,7 +12,13 @@ from typing import Any
 import torch
 import whisper
 
-from .config import AUDIO_DIR, TRANSCRIPT_DIR, WHISPER_MODEL
+from .config import (
+    AUDIO_DIR,
+    CHUNK_DURATION_SECONDS,
+    CHUNK_OVERLAP_SECONDS,
+    TRANSCRIPT_DIR,
+    WHISPER_MODEL,
+)
 
 
 def download_audio(video_id: str, url: str) -> Path:
@@ -45,10 +50,68 @@ def download_audio(video_id: str, url: str) -> Path:
     return out_path
 
 
-def transcribe_audio(audio_path: Path, model: whisper.Whisper | None = None) -> list[dict[str, Any]]:
-    """Transcribe an audio file and return a list of segments with timestamps.
+def _window_segments(
+    segments: list[dict[str, Any]],
+    target_duration: float,
+    overlap: float,
+) -> list[dict[str, Any]]:
+    """Slide a fixed-duration window across timed segments, with overlap.
 
-    Each segment dict has keys: start, end, text.
+    Each output chunk preserves the real start/end of the contained segments;
+    no timestamp interpolation. Adjacent windows share `overlap` seconds so
+    queries that straddle a chunk boundary still match.
+    """
+    if not segments:
+        return []
+
+    stride = max(target_duration - overlap, 1.0)
+    chunks: list[dict[str, Any]] = []
+    i = 0
+    n = len(segments)
+
+    while i < n:
+        window_start = segments[i]["start"]
+        deadline = window_start + target_duration
+
+        parts: list[str] = []
+        j = i
+        while j < n and segments[j]["start"] < deadline:
+            parts.append(segments[j]["text"])
+            j += 1
+
+        if not parts:
+            break
+
+        last_end = segments[j - 1]["end"]
+        text = " ".join(p for p in parts if p).strip()
+        if text:
+            chunks.append(
+                {
+                    "start": round(window_start, 2),
+                    "end": round(last_end, 2),
+                    "text": text,
+                }
+            )
+
+        if j >= n:
+            break
+
+        target_next = window_start + stride
+        new_i = i + 1
+        while new_i < n and segments[new_i]["start"] < target_next:
+            new_i += 1
+        i = new_i if new_i > i else i + 1
+
+    return chunks
+
+
+def transcribe_audio(audio_path: Path, model: whisper.Whisper | None = None) -> list[dict[str, Any]]:
+    """Transcribe an audio file and return a list of windowed chunks.
+
+    Each chunk dict has keys: start, end, text. Chunks are produced by sliding
+    a CHUNK_DURATION_SECONDS window over Whisper's native segments with
+    CHUNK_OVERLAP_SECONDS of overlap between adjacent windows. Timestamps are
+    Whisper's own — not interpolated.
     """
     if model is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -60,62 +123,15 @@ def transcribe_audio(audio_path: Path, model: whisper.Whisper | None = None) -> 
         word_timestamps=False,
     )
 
-    # Merge segments that span the same sentence
-    merged_segments = []
-    current_segment = None
-    for seg in result.get("segments", []):
-        text = seg["text"].strip()
-        if not text:
-            continue
+    raw_segments = [
+        {"start": float(s["start"]), "end": float(s["end"]), "text": s["text"].strip()}
+        for s in result.get("segments", [])
+        if s.get("text", "").strip()
+    ]
+    if not raw_segments:
+        return []
 
-        if current_segment is None:
-            current_segment = {
-                "start": seg["start"],
-                "end": seg["end"],
-                "text": text
-            }
-        else:
-            current_segment["end"] = seg["end"]
-            current_segment["text"] += " " + text
-
-        # If the text ends with sentence-ending punctuation, finalize the segment
-        if re.search(r'[.!?]\s*$', text):
-            merged_segments.append(current_segment)
-            current_segment = None
-
-    # Add any remaining segment
-    if current_segment is not None:
-        merged_segments.append(current_segment)
-
-    segments = []
-    for seg in merged_segments:
-        text = seg["text"].strip()
-        sentences = re.split(r'(?<=[.!?])\s+', text)
-        sentences = [s.strip() for s in sentences if s.strip()]
-
-        if not sentences:
-            continue
-
-        seg_start = round(seg["start"], 2)
-        seg_end = round(seg["end"], 2)
-        duration = seg_end - seg_start
-        total_chars = sum(len(s) for s in sentences)
-        if total_chars == 0:
-            continue
-
-        current_time = seg_start
-        for sentence in sentences:
-            sentence_duration = duration * len(sentence) / total_chars
-            segments.append(
-                {
-                    "start": round(current_time, 2),
-                    "end": round(current_time + sentence_duration, 2),
-                    "text": sentence,
-                }
-            )
-            current_time += sentence_duration
-
-    return segments
+    return _window_segments(raw_segments, CHUNK_DURATION_SECONDS, CHUNK_OVERLAP_SECONDS)
 
 
 def save_transcript(video_id: str, segments: list[dict[str, Any]]) -> Path:

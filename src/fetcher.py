@@ -155,8 +155,12 @@ def _fetch_channel_videos_with_yt_dlp(
             seen_ids.add(video_id)
 
             title = entry.get("title", "")
-            duration_secs = entry.get("duration")
-            if duration_secs is None:
+            duration_raw = entry.get("duration")
+            if duration_raw is None:
+                continue
+            try:
+                duration_secs = int(duration_raw)
+            except (TypeError, ValueError):
                 continue
 
             upload_date = entry.get("upload_date")

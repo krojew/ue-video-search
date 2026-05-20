@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .embeddings import embed_text
+from .embeddings import embed_query
 from .vectordb import search as vector_search
 
 
@@ -57,7 +57,7 @@ def search_videos(query: str, top_k: int = 10) -> list[dict[str, Any]]:
         raise ValueError("Search query cannot be empty")
 
     try:
-        query_embedding = embed_text(query)
+        query_embedding = embed_query(query)
     except Exception as e:
         if "Connection refused" in str(e) or "timeout" in str(e).lower():
             raise ConnectionError("Unable to connect to embedding service. Please ensure Ollama is running and the embedding model is available.") from e

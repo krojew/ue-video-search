@@ -1,12 +1,14 @@
 # Unreal Engine YouTube Video Search — v2.0
 
-Fetches videos from the [Unreal Engine YouTube channel](https://www.youtube.com/unrealengine), transcribes them with Whisper, generates embeddings via Ollama, stores them in Qdrant, and provides semantic search with timestamped links.
+Fetches videos from the [Unreal Engine YouTube channel](https://www.youtube.com/unrealengine), transcribes them with faster-whisper, generates embeddings via Ollama, stores them in Qdrant, and provides semantic search with timestamped links.
 
 ## Features
 
 - **YouTube Integration**: Automatically fetches video metadata from Unreal Engine's YouTube channel
 - **Smart Filtering**: Configurable content filters to skip UEFN/Fortnite, automotive, and archvis videos; optional inclusion of live streams
-- **GPU-Accelerated Transcription**: Uses OpenAI Whisper with CUDA support for fast transcription
+- **GPU-Accelerated Transcription**: Uses faster-whisper (CTranslate2) with float16 on CUDA and int8 on CPU; quantization is selected automatically at load time
+- **Pipelined Ingest**: The next video's audio is downloaded in the background while the current one transcribes, so the GPU rarely waits on the network
+- **Cached Opus Audio**: Audio is stored as opus (the codec YouTube already serves), avoiding a 16 kHz WAV resample and shrinking the cache ~10×; Whisper resamples internally on load
 - **Windowed Chunking**: 2-minute overlapping windows preserve topical context for semantic search, with native Whisper timestamps for accurate jump-to-moment links
 - **Title-Anchored Embeddings**: Each chunk is embedded with its video title prepended so retrieval reflects the video's actual subject, not just incidental keyword mentions
 - **Asymmetric Retrieval**: Query-side instruction prefix (Qwen3-style by default; configurable for BGE/E5/etc.) so queries and documents share an embedding space
@@ -25,6 +27,8 @@ What changed at the data layer:
 - Document embeddings now include the video title (`"{title}\n\n{chunk}"`). v1 embeddings were transcript-only and won't benefit from title anchoring.
 - Qdrant point IDs are derived from `(video_id, start_seconds)`. Because v2 chunks have different start times than v1 sentence chunks, re-ingesting on top of a v1 collection leaves the old chunks in place — the collection should be dropped first.
 - YouTube titles are now read from every `runs[]` entry, so titles previously truncated mid-string will only be fixed for re-fetched videos.
+- Audio downloads are now cached as `.opus` (the codec YouTube already serves) rather than 16 kHz `.wav`. Any `data/audio/*.wav` files left from v1.x are orphaned — the new code only looks for `.opus`, so the old files take disk space but are never read.
+- The transcription backend has switched from `openai-whisper` to `faster-whisper` (CTranslate2). The cached transcript JSON format is unchanged, so this is purely a speed/quantization improvement — but `pip install -r requirements.txt` is required to pick up the new dependency.
 
 Migration steps:
 
@@ -32,13 +36,18 @@ Migration steps:
 # 1. Drop the Qdrant collection (old v1 chunks have different IDs and would linger)
 Invoke-RestMethod -Method Delete http://localhost:6333/collections/ue_videos
 
-# 2. Delete cached transcripts so the new Whisper settings re-run
+# 2. Delete cached transcripts so the new Whisper settings re-run, and clear
+#    any orphaned .wav files from the v1 audio cache (new code uses .opus)
 Remove-Item -Recurse -Force data/transcripts
+Remove-Item -Force data/audio/*.wav -ErrorAction SilentlyContinue
 
-# 3. Re-fetch so titles are captured with the multi-run fix and filters re-applied
+# 3. Refresh Python dependencies (faster-whisper replaces openai-whisper)
+pip install -r requirements.txt
+
+# 4. Re-fetch so titles are captured with the multi-run fix and filters re-applied
 python main.py fetch --refresh
 
-# 4. Re-ingest from scratch
+# 5. Re-ingest from scratch
 python main.py ingest
 ```
 
@@ -188,8 +197,8 @@ YouTube Channel
     │
     ▼
 ┌───────────┐     ┌───────────┐     ┌──────────┐     ┌────────────┐
-│ scrapetube│───▶│  yt-dlp    │───▶│ Whisper  │───▶│ Sentence   │
-│ (listing) │     │ (audio)   │     │ (STT)    │     │ Splitter   │
+│ scrapetube│───▶│  yt-dlp    │───▶│ Whisper  │───▶│ Window     │
+│ (listing) │     │ (opus)    │     │ (STT)    │     │ Splitter   │
 └───────────┘     └───────────┘     └──────────┘     └───┬────────┘
                                                          │
                                                          ▼
@@ -213,14 +222,14 @@ YouTube Channel
 
 ### Data Flow
 
-1. **Fetch**: Use scrapetube to get video metadata from YouTube channel
-2. **Filter**: Apply content filters (UEFN/Fortnite, automotive, archvis)
-3. **Download**: yt-dlp extracts audio streams (16kHz WAV)
-4. **Transcribe**: Whisper converts audio to text with timestamps
-5. **Segment**: Split transcripts into sentence-level chunks
-6. **Embed**: Generate vector embeddings using Ollama
-7. **Store**: Save embeddings and metadata in Qdrant vector database
-8. **Search**: Perform semantic similarity search with timestamped results
+1. **Fetch**: Use scrapetube to get video metadata from YouTube channel (yt-dlp is the fallback when scrapetube is blocked)
+2. **Filter**: Apply content filters (UEFN/Fortnite, automotive, archvis) using word-boundary regex
+3. **Download**: yt-dlp extracts the original opus audio stream (no resample); the next video is prefetched in the background while the current one transcribes
+4. **Transcribe**: faster-whisper converts audio to text with timestamps, pinned to English with a UE-jargon initial prompt
+5. **Segment**: Slide a 2-minute window over Whisper segments with 15s of overlap, preserving native timestamps
+6. **Embed**: Prepend the video title to each chunk, then batch through Ollama for vector embeddings
+7. **Store**: Save embeddings and metadata in Qdrant; point IDs are derived from `(video_id, start_seconds)` so re-ingest is idempotent
+8. **Search**: Wrap the query with a model-specific instruction prefix, retrieve from Qdrant, then rerank with title-keyword boosting, adjacent-chunk merging, and per-video diversity caps
 
 ## Docker Deployment
 
@@ -306,6 +315,6 @@ curl http://localhost:11434/api/tags
 
 1. **New filters**: Add filter logic in `fetcher.py` and CLI options in `main.py`
 2. **Different models**: Update `WHISPER_MODEL` or `EMBEDDING_MODEL` in config
-3. **Custom segmentation**: Modify `transcriber.py` sentence splitting logic
+3. **Custom segmentation**: Modify the `_window_segments` helper in `transcriber.py`, or tune `CHUNK_DURATION_SECONDS` / `CHUNK_OVERLAP_SECONDS` in `config.py`
 4. **Additional metadata**: Extend data structures in `vectordb.py`
 

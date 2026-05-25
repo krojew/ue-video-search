@@ -51,8 +51,6 @@ python main.py fetch --refresh
 python main.py ingest
 ```
 
-The bundled snapshot in `snapshots/` is also a v1 artifact and will not reflect the v2.0 improvements — regenerate it after re-ingest if you redistribute it.
-
 ## Prerequisites
 
 - **Docker & Docker Compose** — for Qdrant and Ollama services

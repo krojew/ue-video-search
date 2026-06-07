@@ -8,7 +8,25 @@ import importlib
 import pytest
 
 
-def reload_config(monkeypatch, **env):
+# Env vars config reads; the defaults test must clear any ambient values
+# (e.g. a QDRANT_PORT exported to point tests at a live service) so it
+# genuinely exercises the built-in defaults rather than the environment.
+_CONFIG_ENV_VARS = (
+    "MAX_AGE_YEARS",
+    "MIN_DURATION_SECONDS",
+    "EMBEDDING_DIM",
+    "QDRANT_PORT",
+    "QDRANT_HOST",
+    "CHUNK_DURATION_SECONDS",
+    "CHUNK_OVERLAP_SECONDS",
+    "OLLAMA_BASE_URL",
+)
+
+
+def reload_config(monkeypatch, *, clear_ambient=False, **env):
+    if clear_ambient:
+        for k in _CONFIG_ENV_VARS:
+            monkeypatch.delenv(k, raising=False)
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     import src.config as c
@@ -28,7 +46,7 @@ def _restore_config():
 
 
 def test_valid_defaults_reload_ok(monkeypatch):
-    c = reload_config(monkeypatch)
+    c = reload_config(monkeypatch, clear_ambient=True)
     assert c.MAX_AGE_YEARS == 3
     assert c.MIN_DURATION_SECONDS == 900
     assert c.EMBEDDING_DIM == 1024

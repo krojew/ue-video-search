@@ -138,6 +138,75 @@ def test_bug3_thread_start_failure_rolls_back_running(monkeypatch):
     assert w.is_running() is False, "_running must be rolled back on launch failure"
 
 
+_EXPECTED_STATUS_KEYS = {
+    "phase",
+    "total",
+    "completed",
+    "skipped",
+    "failed",
+    "current_video",
+    "message",
+    "new_videos_found",
+}
+
+
+def test_bug4_update_status_is_atomic_and_complete(monkeypatch):
+    """_update_status applies fields/increments under lock and emits a full dict."""
+    w._status = w.IngestStatus()
+    w._update_status(total=3, message="hi")
+    snap = w.get_status()
+    assert snap["total"] == 3
+    assert snap["message"] == "hi"
+    assert set(snap.keys()) == _EXPECTED_STATUS_KEYS
+
+    w._update_status(inc={"completed": 1, "failed": 1})
+    w._update_status(inc={"completed": 1})
+    snap = w.get_status()
+    assert snap["completed"] == 2
+    assert snap["failed"] == 1
+
+
+def test_bug4_concurrent_get_status_never_raises(monkeypatch):
+    """Hammering get_status() while _run_ingest mutates _status must not tear."""
+    videos = [_vid(str(i)) for i in range(8)]
+    monkeypatch.setattr(w, "load_video_list", lambda: list(videos))
+    monkeypatch.setattr(w, "fetch_video_list", lambda **k: list(videos))
+    monkeypatch.setattr(w, "save_video_list", lambda v: None)
+
+    processed: list[str] = []
+    _patch_heavy(monkeypatch, indexed_ids=set(), processed=processed)
+
+    errors: list[BaseException] = []
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            try:
+                snap = w.get_status()
+                assert set(snap.keys()) == _EXPECTED_STATUS_KEYS
+                # counters must always be plain ints, never partially updated
+                assert isinstance(snap["completed"], int)
+                assert isinstance(snap["failed"], int)
+            except BaseException as exc:  # noqa: BLE001 - record any tear/exception
+                errors.append(exc)
+                return
+
+    readers = [threading.Thread(target=reader) for _ in range(4)]
+    for r in readers:
+        r.start()
+
+    w._run_ingest(incremental=False, reindex=False)
+
+    stop.set()
+    for r in readers:
+        r.join(timeout=5)
+
+    assert not errors, f"concurrent get_status raised/tore: {errors[:1]}"
+    final = w.get_status()
+    assert final["phase"] == w.IngestPhase.DONE.value
+    assert final["completed"] == 8
+
+
 def test_bug1_incremental_reindex_off_unchanged_when_all_indexed(monkeypatch):
     """When everything cached is already indexed, nothing is processed."""
     cached = [_vid("a"), _vid("b")]

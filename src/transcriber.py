@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -37,18 +38,32 @@ def download_audio(video_id: str, url: str) -> Path:
     # rather than a transcode. Skipping the WAV resample to 16 kHz mono saves
     # bandwidth (~10x smaller files) and ffmpeg time; Whisper resamples
     # internally on load.
-    subprocess.run(
-        [
-            yt_dlp_bin,
-            "--no-playlist",
-            "-x",
-            "--audio-format", "opus",
-            "-o", out_path,
-            url,
-        ],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                yt_dlp_bin,
+                "--no-playlist",
+                "-x",
+                "--audio-format", "opus",
+                "-o", str(out_path),
+                url,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=600,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Surface yt-dlp's own diagnostic rather than an opaque non-zero exit.
+        stderr = exc.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"yt-dlp failed for {video_id} (exit {exc.returncode}): {stderr.strip()}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"yt-dlp timed out after {exc.timeout}s downloading {video_id}"
+        ) from exc
     return out_path
 
 
@@ -156,38 +171,75 @@ def transcribe_audio(audio_path: Path, model: WhisperModel | None = None) -> lis
 
 
 def save_transcript(video_id: str, segments: list[dict[str, Any]]) -> Path:
-    """Save transcript segments to a JSON file."""
+    """Save transcript segments to a JSON file atomically.
+
+    Write to a temp file in the same directory, then os.replace() it into
+    place. os.replace is atomic on the same filesystem, so a crash mid-write
+    can never leave a half-written (corrupt) JSON file behind — a reader sees
+    either the old complete file or the new complete one.
+    """
     TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     path = TRANSCRIPT_DIR / f"{video_id}.json"
-    path.write_text(json.dumps(segments, indent=2))
+    tmp_path = TRANSCRIPT_DIR / f"{video_id}.json.tmp"
+    tmp_path.write_text(json.dumps(segments, indent=2))
+    os.replace(tmp_path, path)
     return path
 
 
 def load_transcript(video_id: str) -> list[dict[str, Any]] | None:
-    """Load a previously saved transcript, or None if not found."""
+    """Load a previously saved transcript, or None if not found.
+
+    A corrupt/unparseable file is treated as not-cached (returns None) so the
+    video gets re-processed rather than raising on every load.
+    """
     path = TRANSCRIPT_DIR / f"{video_id}.json"
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
-def process_video(video_id: str, url: str, model: WhisperModel | None = None) -> list[dict[str, Any]]:
-    """Full pipeline: download audio → transcribe → save. Returns segments."""
+def process_video(
+    video_id: str,
+    url: str,
+    model: WhisperModel | None = None,
+    cleanup_audio: bool = True,
+) -> list[dict[str, Any]]:
+    """Full pipeline: download audio → transcribe → save. Returns segments.
+
+    When ``cleanup_audio`` is True (the default), the downloaded ``.opus`` file
+    is deleted after transcription regardless of whether it pre-existed on disk.
+    This matters because a prefetch step downloads the *next* video's audio
+    ahead of time, so by the time this runs the file is normally already
+    present — keying cleanup on pre-existence (the old behavior) would leak
+    every prefetched file and grow disk usage without bound. The
+    transcript-cache short-circuit below never touches the filesystem, so a
+    cached run leaves any audio untouched.
+    """
     existing = load_transcript(video_id)
     if existing is not None:
         return existing
 
-    audio_path = AUDIO_DIR / f"{video_id}.opus"
-    audio_existed = audio_path.exists()
     audio_path = download_audio(video_id, url)
-    segments = transcribe_audio(audio_path, model=model)
-    save_transcript(video_id, segments)
-
-    # Delete temporary audio file if it was downloaded (not cached)
-    if not audio_existed:
-        try:
-            audio_path.unlink(missing_ok=True)
-        except Exception:
-            pass  # Ignore deletion errors
+    try:
+        segments = transcribe_audio(audio_path, model=model)
+        # Do NOT persist an empty transcript. transcribe_audio returns [] both
+        # for genuinely-silent videos and for upstream failures; caching []
+        # would make load_transcript hand back [] forever (it is `not None`),
+        # permanently blocking re-ingest of a recoverable failure. Skipping the
+        # save means truly-silent videos are retried every run — an acceptable
+        # cost versus losing recoverable ones.
+        if segments:
+            save_transcript(video_id, segments)
+    finally:
+        # Best-effort: remove the audio whether or not it pre-existed, since
+        # prefetch makes "already on disk" the normal case (see docstring).
+        if cleanup_audio:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except OSError:
+                pass  # Ignore deletion errors
 
     return segments

@@ -51,15 +51,14 @@ atexit.register(close_session)
 
 
 def embed_text(text: str) -> list[float]:
-    """Return an embedding vector for a passage of text (document side)."""
-    with _session.post(
-        f"{OLLAMA_BASE_URL}/api/embed",
-        json={"model": EMBEDDING_MODEL, "input": text},
-        timeout=300,
-    ) as resp:
-        resp.raise_for_status()
-        data = resp.json()
-    return data["embeddings"][0]
+    """Return an embedding vector for a passage of text (document side).
+
+    Delegates to embed_texts so the single/query path gets the same count and
+    dimension validation as the batch path — a wrong-sized vector after a model
+    swap fails with a clear RuntimeError here instead of cryptically inside
+    Qdrant at query time.
+    """
+    return embed_texts([text])[0]
 
 
 def embed_query(query: str, instruction: str | None = None) -> list[float]:

@@ -51,7 +51,10 @@ def test_search_value_error_exits_nonzero(monkeypatch):
     result = runner.invoke(cli_mod.cli, ["search", "foo"])
 
     assert result.exit_code != 0
-    assert "Error" in result.output
+    # Pin the ValueError branch specifically: its message must surface, and it
+    # must NOT have fallen through to the generic 'Unexpected Error' handler.
+    assert "bad query" in result.output
+    assert "Unexpected Error" not in result.output
     assert "Traceback" not in result.output
 
 

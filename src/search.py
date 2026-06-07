@@ -108,10 +108,18 @@ def _extract_keywords(text: str) -> set[str]:
 
 
 def _seconds_to_hms(seconds: float) -> str:
-    """Convert seconds to H:MM:SS format."""
-    h = int(seconds) // 3600
-    m = (int(seconds) % 3600) // 60
-    s = int(seconds) % 60
+    """Convert seconds to H:MM:SS format.
+
+    Rounds to the nearest second (so 89.7s -> 1:30, not 1:29) and clamps
+    negative input to 0 so clock skew / future timestamps can't produce
+    garbage output.
+    """
+    total = int(round(seconds))
+    if total < 0:
+        total = 0
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
     if h > 0:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"
@@ -158,10 +166,16 @@ def search_videos(query: str, top_k: int = 10) -> list[dict[str, Any]]:
             raise RuntimeError("No video data has been indexed yet. Please run an ingest first.") from e
         raise RuntimeError(f"Search failed: {e}") from e
 
-    title_keywords_lower = {kw.lower() for kw in _extract_keywords(query)}
+    query_keywords = _extract_keywords(query)
     for result in raw_results:
-        title_lower = result["video_title"].lower()
-        title_matches = sum(1 for kw in title_keywords_lower if kw in title_lower)
+        # Match keywords on word boundaries, not substrings: tokenize the title
+        # the same way _extract_keywords tokenizes the query, then count how many
+        # query keywords appear as whole tokens (set intersection). This avoids
+        # false positives like "ai" matching "chain"/"detailing".
+        title_tokens = set(
+            re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", result["video_title"].lower())
+        )
+        title_matches = len(query_keywords & title_tokens)
         if title_matches > 0:
             result["score"] = result["score"] + (_TITLE_BOOST_PER_KEYWORD * title_matches)
 

@@ -522,9 +522,14 @@
   const searchBtn = document.getElementById('search-btn');
   const resultsDiv = document.getElementById('search-results');
 
+  // Sequence counter so a stale (slower/older) response can't overwrite a newer one.
+  let searchSeq = 0;
+
   async function doSearch() {
     const q = searchInput.value.trim();
     if (!q) return;
+
+    const mySeq = ++searchSeq;
 
     searchBtn.disabled = true;
     searchBtn.innerHTML = '<span class="spinner"></span>Searching...';
@@ -533,6 +538,9 @@
     try {
       const r = await fetch('/api/search?q=' + encodeURIComponent(q) + '&top_k=15');
       const data = await r.json();
+
+      // A newer search has started while we were awaiting; drop this stale result.
+      if (mySeq !== searchSeq) return;
 
       if (data.error) {
         resultsDiv.innerHTML = `
@@ -588,10 +596,15 @@
 
       resultsDiv.innerHTML = html;
     } catch(e) {
+      // Don't render a stale error over a newer in-flight search either.
+      if (mySeq !== searchSeq) return;
       resultsDiv.innerHTML = `<div class="empty-state"><h3>Search failed</h3><p>Unable to connect to search service. Please try again later.</p></div>`;
     } finally {
-      searchBtn.disabled = false;
-      searchBtn.textContent = 'Search';
+      // Only the latest in-flight search may reset the button state.
+      if (mySeq === searchSeq) {
+        searchBtn.disabled = false;
+        searchBtn.textContent = 'Search';
+      }
     }
   }
 
@@ -664,7 +677,15 @@
     activeEs = es;
 
     es.addEventListener('status', e => {
-      const data = JSON.parse(e.data);
+      let data;
+      try {
+        data = JSON.parse(e.data);
+      } catch (err) {
+        // Malformed event: log and ignore so the handler doesn't crash and
+        // downstream close()/cleanup logic stays intact for valid events.
+        console.warn('Ignoring malformed ingest status event:', err);
+        return;
+      }
       updateIngestUI(data);
       if (data.phase === 'done' || data.phase === 'error') {
         es.close();
@@ -686,7 +707,12 @@
           if (!['idle', 'done', 'error'].includes(data.phase)) {
             connectToIngestStream();
           }
-        } catch (_) {}
+        } catch (_) {
+          // A failed status check must not leave the action buttons stuck
+          // disabled; re-enable them so the user can retry an ingest.
+          btnFull.disabled = false;
+          btnUpdate.disabled = false;
+        }
       }, 2000);
     };
   }

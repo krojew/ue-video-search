@@ -351,6 +351,35 @@ def test_bug5_malformed_video_does_not_abort_run(monkeypatch):
     assert snap["completed"] == 2, "both entries advance the loop (1 failed + 1 ok)"
 
 
+def test_bug5_malformed_video_skip_indexed_true_does_not_abort(monkeypatch):
+    """DEFAULT path (skip_indexed=True): a malformed entry in the index-diff
+    pre-filter must be dropped, not raise KeyError and flip the run to ERROR.
+
+    Regression guard for the review-R2 finding: the pre-filter ran outside the
+    per-video try, so a bad dict aborted the whole run. Fails before the .get()
+    fix at the index-diff comprehension.
+    """
+    good = _vid("good")
+    malformed = {"not_a_video": True}  # missing video_id
+    videos = [malformed, good]
+
+    monkeypatch.setattr(w, "load_video_list", lambda: list(videos))
+    monkeypatch.setattr(w, "fetch_video_list", lambda **k: list(videos))
+    monkeypatch.setattr(w, "save_video_list", lambda v: None)
+    monkeypatch.setattr(w, "save_fetch_result", lambda v: list(v))
+
+    processed: list[str] = []
+    # reindex=False -> skip_indexed=True (the default), so the bad entry hits
+    # the index-diff comprehension that BUG5's fix must now tolerate.
+    _patch_heavy(monkeypatch, indexed_ids=set(), processed=processed)
+
+    w._run_ingest(incremental=False, reindex=False)
+
+    snap = w.get_status()
+    assert snap["phase"] == w.IngestPhase.DONE.value, "run must complete, not ERROR"
+    assert processed == ["good"], "the good video must still be processed"
+
+
 def test_bug1_incremental_reindex_off_unchanged_when_all_indexed(monkeypatch):
     """When everything cached is already indexed, nothing is processed."""
     cached = [_vid("a"), _vid("b")]

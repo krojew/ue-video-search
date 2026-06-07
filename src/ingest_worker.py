@@ -247,7 +247,10 @@ def _run_ingest(
 
         if skip_indexed:
             indexed_ids = list_indexed_video_ids(client)
-            to_process = [v for v in videos if v["video_id"] not in indexed_ids]
+            # Use .get() so a malformed entry missing video_id is dropped here
+            # rather than raising KeyError outside the per-video try and
+            # flipping the whole run to ERROR (BUG5).
+            to_process = [v for v in videos if v.get("video_id") and v["video_id"] not in indexed_ids]
             skipped = len(videos) - len(to_process)
         else:
             to_process = videos

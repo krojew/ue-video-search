@@ -133,7 +133,10 @@ def _ingest_videos(
     # Fetch the indexed-id set in one scroll instead of one round-trip per video.
     if skip_indexed:
         indexed_ids = list_indexed_video_ids(client)
-        to_process = [v for v in videos if v["video_id"] not in indexed_ids]
+        # Use .get() so a malformed entry missing video_id is dropped here
+        # rather than raising KeyError and aborting the whole run before the
+        # per-video loop (BUG5 — this pre-filter runs outside any try block).
+        to_process = [v for v in videos if v.get("video_id") and v["video_id"] not in indexed_ids]
         skipped = len(videos) - len(to_process)
         if skipped:
             console.print(f"[dim]Skipping {skipped} already-indexed video(s).[/dim]")

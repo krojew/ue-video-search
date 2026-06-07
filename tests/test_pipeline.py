@@ -117,6 +117,53 @@ def test_bug5_malformed_video_does_not_abort_ingest(monkeypatch):
     assert upserts == ["good"], "only the good video should be upserted"
 
 
+def test_bug5_malformed_video_skip_indexed_true_does_not_abort(monkeypatch):
+    """DEFAULT path (skip_indexed=True): a malformed entry in the index-diff
+    pre-filter must be dropped, not raise KeyError and abort the run.
+
+    Regression guard for the review-R2 finding: the pre-filter comprehension
+    ran outside any try, so `v["video_id"]` on a bad dict aborted the whole run
+    before the per-video loop. This test would fail before the .get() fix.
+    """
+    good = _vid("good")
+    malformed = {"not_a_video": True}  # missing video_id
+    to_process = [malformed, good]
+
+    processed: list[str] = []
+
+    def fake_process_video(vid, url, model=None):
+        processed.append(vid)
+        return [{"text": "hi", "start": 0.0, "end": 1.0}]
+
+    monkeypatch.setattr(p, "get_client", lambda: object())
+    monkeypatch.setattr(p, "ensure_collection", lambda client: None)
+    # Empty index -> the good video is not "already indexed".
+    monkeypatch.setattr(p, "list_indexed_video_ids", lambda client: set())
+    monkeypatch.setattr(p, "load_whisper_model", lambda: object())
+    monkeypatch.setattr(p, "process_video", fake_process_video)
+    monkeypatch.setattr(p, "build_chunk_embed_text", lambda title, text: text)
+    monkeypatch.setattr(p, "embed_texts", lambda texts: [[0.0] for _ in texts])
+    monkeypatch.setattr(p, "upsert_chunks", lambda vid, *a, **k: 1)
+    monkeypatch.setattr(p, "load_transcript", lambda video_id: None)
+    monkeypatch.setattr(p, "download_audio", lambda video_id, url: None)
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+        @staticmethod
+        def empty_cache():
+            return None
+
+    monkeypatch.setattr(p.torch, "cuda", _FakeCuda)
+
+    # Must NOT raise (the bug raised KeyError in the pre-filter at skip_indexed=True).
+    p._ingest_videos(to_process, skip_indexed=True, label="t")
+
+    assert processed == ["good"], "the good video must still be processed"
+
+
 def test_bug1_run_ingest_new_only_processes_full_merged_list(monkeypatch):
     """Incremental CLI ingest must hand the *merged* list to _ingest_videos.
 

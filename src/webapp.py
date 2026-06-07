@@ -136,28 +136,42 @@ async def api_ingest_status() -> dict[str, Any]:
     return ingest_worker.get_status()
 
 
+async def _ingest_event_generator(queue):
+    """Yield SSE events for an ingest subscriber `queue`.
+
+    Sends the current status snapshot, then streams live updates until a
+    terminal phase. If ingest already finished before this client connected,
+    no further events will ever arrive on the queue, so we stop right after
+    the snapshot instead of blocking forever (which would leak the queue/task
+    and emit 30s keepalive pings indefinitely). The finally block always
+    unsubscribes the queue.
+    """
+    try:
+        # Send current status immediately
+        status = ingest_worker.get_status()
+        yield {"event": "status", "data": json.dumps(status)}
+
+        # Terminal-phase snapshot: nothing more will be emitted on the queue.
+        if status.get("phase") in ("done", "error"):
+            return
+
+        while True:
+            try:
+                data = await asyncio.wait_for(queue.get(), timeout=30.0)
+                yield {"event": "status", "data": json.dumps(data)}
+                if data.get("phase") in ("done", "error"):
+                    break
+            except asyncio.TimeoutError:
+                # Send keepalive
+                yield {"event": "ping", "data": "{}"}
+    finally:
+        ingest_worker.unsubscribe(queue)
+
+
 @app.get("/api/ingest/stream")
 async def api_ingest_stream():
     """SSE stream of ingest progress events."""
     queue = ingest_worker.subscribe()
-
-    async def event_generator():
-        try:
-            # Send current status immediately
-            yield {"event": "status", "data": json.dumps(ingest_worker.get_status())}
-
-            while True:
-                try:
-                    data = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    yield {"event": "status", "data": json.dumps(data)}
-                    if data.get("phase") in ("done", "error"):
-                        break
-                except asyncio.TimeoutError:
-                    # Send keepalive
-                    yield {"event": "ping", "data": "{}"}
-        finally:
-            ingest_worker.unsubscribe(queue)
-
-    return EventSourceResponse(event_generator())
+    return EventSourceResponse(_ingest_event_generator(queue))
 
 

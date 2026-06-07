@@ -6,6 +6,7 @@ the blocking dependencies that webapp delegates to.
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -150,3 +151,89 @@ def test_api_stats_handles_backend_error(monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json() == {"indexed_chunks": 0, "cached_videos": 1}
+
+
+# ── Bug 2: SSE stream terminates for clients connecting post-ingest ───
+#
+# These drive the SSE async generator directly (deterministic, no network)
+# under asyncio.wait_for so a regression (the old code blocked on queue.get()
+# forever, emitting 30s keepalives) FAILS the test promptly instead of
+# hanging the whole suite for 30s+.
+
+
+def _terminal_status(phase: str = "done") -> dict[str, Any]:
+    return {
+        "phase": phase,
+        "total": 1,
+        "completed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "current_video": "",
+        "message": "Ingest complete." if phase == "done" else "Ingest error: boom",
+        "new_videos_found": 0,
+    }
+
+
+async def _drain_generator(gen, *, item_timeout: float = 2.0) -> list[dict[str, Any]]:
+    """Consume an async generator, bounding each step so a hang surfaces as
+    a TimeoutError rather than blocking forever."""
+    out: list[dict[str, Any]] = []
+    try:
+        while True:
+            item = await asyncio.wait_for(gen.__anext__(), timeout=item_timeout)
+            out.append(item)
+    except StopAsyncIteration:
+        return out
+    finally:
+        await gen.aclose()
+
+
+@pytest.mark.parametrize("phase", ["done", "error"])
+def test_ingest_stream_terminates_when_already_terminal(monkeypatch, phase):
+    """A client connecting after ingest finished must NOT block forever."""
+    monkeypatch.setattr(webapp.ingest_worker, "get_status", lambda: _terminal_status(phase))
+
+    # Track that the subscriber queue is always cleaned up (no leak).
+    unsub_calls: list[Any] = []
+    real_unsubscribe = webapp.ingest_worker.unsubscribe
+
+    def tracking_unsubscribe(q):
+        unsub_calls.append(q)
+        return real_unsubscribe(q)
+
+    monkeypatch.setattr(webapp.ingest_worker, "unsubscribe", tracking_unsubscribe)
+
+    queue = webapp.ingest_worker.subscribe()
+    gen = webapp._ingest_event_generator(queue)
+
+    # asyncio.wait_for around the whole drain: a regression that loops on
+    # keepalives would blow this 5s budget and fail the test (not hang).
+    events = asyncio.run(asyncio.wait_for(_drain_generator(gen), timeout=5.0))
+
+    # Exactly one event: the terminal status snapshot. No keepalive pings.
+    assert len(events) == 1
+    assert events[0]["event"] == "status"
+    payload = json.loads(events[0]["data"])
+    assert payload["phase"] == phase
+    # finally block ran -> queue unsubscribed (no leak).
+    assert unsub_calls == [queue]
+
+
+def test_ingest_stream_live_path_then_terminal(monkeypatch):
+    """Sanity: the non-terminal live path still streams queued updates and
+    stops on a terminal item received from the queue (refactor preserved it)."""
+    monkeypatch.setattr(webapp.ingest_worker, "get_status", lambda: _terminal_status("processing"))
+
+    queue = webapp.ingest_worker.subscribe()
+    # Pre-load a live update followed by a terminal update.
+    queue.put_nowait({"phase": "processing", "message": "working"})
+    queue.put_nowait(_terminal_status("done"))
+
+    gen = webapp._ingest_event_generator(queue)
+    events = asyncio.run(asyncio.wait_for(_drain_generator(gen), timeout=5.0))
+
+    phases = [json.loads(e["data"])["phase"] for e in events]
+    # snapshot(processing) -> live(processing) -> live(done) then stop.
+    assert phases == ["processing", "processing", "done"]
+    assert all(e["event"] == "status" for e in events)
+    webapp.ingest_worker.unsubscribe(queue)

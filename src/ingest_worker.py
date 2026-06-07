@@ -73,7 +73,8 @@ def get_status() -> dict[str, Any]:
 
 
 def is_running() -> bool:
-    return _running
+    with _lock:
+        return _running
 
 
 def subscribe() -> asyncio.Queue:
@@ -136,10 +137,13 @@ def _run_ingest(
     skip_archvis: bool = True,
     include_streams: bool = True,
 ) -> None:
-    """Blocking ingest function meant to run in a thread."""
+    """Blocking ingest function meant to run in a thread.
+
+    `_running` is set to True by `start_ingest` under `_lock` *before* the
+    thread is launched (see BUG3). This function only clears it in `finally`.
+    """
     global _running, _status
     model: WhisperModel | None = None
-    _running = True
     _status = IngestStatus(phase=IngestPhase.FETCHING, message="Fetching video list from YouTube...")
     _emit(_status)
 
@@ -287,7 +291,8 @@ def _run_ingest(
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        _running = False
+        with _lock:
+            _running = False
 
 
 def start_ingest(
@@ -300,14 +305,24 @@ def start_ingest(
     include_streams: bool = True,
 ) -> bool:
     """Start the ingest pipeline in a background thread. Returns False if already running."""
-    global _event_loop
-    if _running:
-        return False
+    global _event_loop, _running
+    # Atomic check-and-set under _lock: two near-simultaneous callers must not
+    # both observe _running == False and start two ingest threads (BUG3).
+    with _lock:
+        if _running:
+            return False
+        _running = True
     _event_loop = loop
     t = threading.Thread(
         target=_run_ingest,
         args=(incremental, reindex, skip_uefn, skip_automotive, skip_archvis, include_streams),
         daemon=True,
     )
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        # Roll back the reservation if the thread never actually launched.
+        with _lock:
+            _running = False
+        raise
     return True

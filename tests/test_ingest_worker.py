@@ -94,6 +94,50 @@ def test_bug1_incremental_retries_cached_video_missing_from_index(monkeypatch):
     assert saved, "merged video list should still be saved"
 
 
+def test_bug3_start_ingest_is_not_double_started(monkeypatch):
+    """Two rapid start_ingest calls must start exactly one worker thread."""
+    started = []
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            self._kwargs = kwargs
+
+        def start(self):
+            started.append(self)
+
+    monkeypatch.setattr(w.threading, "Thread", FakeThread)
+    # _run_ingest must never actually run (so _running stays reserved).
+    monkeypatch.setattr(w, "_run_ingest", lambda *a, **k: None)
+
+    loop = object()  # never touched because the fake thread no-ops
+    first = w.start_ingest(loop, incremental=True)
+    second = w.start_ingest(loop, incremental=True)
+
+    assert first is True
+    assert second is False
+    assert len(started) == 1, "only one ingest thread may be started"
+    assert w.is_running() is True
+
+
+def test_bug3_thread_start_failure_rolls_back_running(monkeypatch):
+    """If the thread fails to launch, _running must not stay stuck True."""
+
+    class ExplodingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("cannot start thread")
+
+    monkeypatch.setattr(w.threading, "Thread", ExplodingThread)
+    monkeypatch.setattr(w, "_run_ingest", lambda *a, **k: None)
+
+    with pytest.raises(RuntimeError):
+        w.start_ingest(object(), incremental=True)
+
+    assert w.is_running() is False, "_running must be rolled back on launch failure"
+
+
 def test_bug1_incremental_reindex_off_unchanged_when_all_indexed(monkeypatch):
     """When everything cached is already indexed, nothing is processed."""
     cached = [_vid("a"), _vid("b")]

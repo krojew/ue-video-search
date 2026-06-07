@@ -108,10 +108,18 @@ def _extract_keywords(text: str) -> set[str]:
 
 
 def _seconds_to_hms(seconds: float) -> str:
-    """Convert seconds to H:MM:SS format."""
-    h = int(seconds) // 3600
-    m = (int(seconds) % 3600) // 60
-    s = int(seconds) % 60
+    """Convert seconds to H:MM:SS format.
+
+    Rounds to the nearest second (so 89.7s -> 1:30, not 1:29) and clamps
+    negative input to 0 so clock skew / future timestamps can't produce
+    garbage output.
+    """
+    total = int(round(seconds))
+    if total < 0:
+        total = 0
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
     if h > 0:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m}:{s:02d}"

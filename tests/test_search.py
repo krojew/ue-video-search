@@ -38,3 +38,12 @@ def test_title_boost_matches_whole_words_not_substrings(monkeypatch):
     # 'ai' only a substring of 'chain'/'detailing' -> no boost.
     assert not_boosted == 0.5
     assert boosted > not_boosted
+
+
+def test_seconds_to_hms_rounds_and_clamps():
+    """Round to nearest second (not truncate) and clamp negatives to 0."""
+    assert search._seconds_to_hms(89.7) == "1:30"
+    assert search._seconds_to_hms(0) == "0:00"
+    assert search._seconds_to_hms(3600) == "1:00:00"
+    assert search._seconds_to_hms(3661.4) == "1:01:01"
+    assert search._seconds_to_hms(-5) == "0:00"

@@ -52,6 +52,7 @@ def test_embed_texts_raises_when_ollama_returns_fewer(monkeypatch):
 
 
 def test_embed_texts_aligned_when_counts_match(monkeypatch):
+    monkeypatch.setattr(embeddings.config, "EMBEDDING_DIM", 4)
     texts = ["a", "b", "c"]
     expected = [[0.1] * 4, [0.2] * 4, [0.3] * 4]
     monkeypatch.setattr(
@@ -65,7 +66,9 @@ def test_embed_texts_aligned_when_counts_match(monkeypatch):
 
 
 def test_embed_texts_batches_each_validated(monkeypatch):
-    # Two batches of size 2; second batch comes back short -> raise.
+    # Two batches of size 2; second batch comes back short -> raise on COUNT
+    # (vectors are the right dimension, so this isolates the count check).
+    monkeypatch.setattr(embeddings.config, "EMBEDDING_DIM", 4)
     calls = {"n": 0}
 
     def _fake_post(*args, **kwargs):
@@ -78,3 +81,29 @@ def test_embed_texts_batches_each_validated(monkeypatch):
     monkeypatch.setattr(embeddings._session, "post", _fake_post)
     with pytest.raises(RuntimeError):
         embeddings.embed_texts(["a", "b", "c", "d"], batch_size=2)
+
+
+# ── BUG 2: wrong embedding dimension must raise ───────────────────────────
+
+
+def test_embed_texts_raises_on_wrong_dimension(monkeypatch):
+    # Counts match (1 vector for 1 input) but the vector is the wrong length.
+    monkeypatch.setattr(embeddings.config, "EMBEDDING_DIM", 1024)
+    monkeypatch.setattr(
+        embeddings._session,
+        "post",
+        _fake_post_factory([[0.1] * 8]),  # 8 != 1024
+    )
+    with pytest.raises(RuntimeError):
+        embeddings.embed_texts(["only one"])
+
+
+def test_embed_texts_accepts_correct_dimension(monkeypatch):
+    monkeypatch.setattr(embeddings.config, "EMBEDDING_DIM", 4)
+    expected = [[0.1] * 4, [0.2] * 4]
+    monkeypatch.setattr(
+        embeddings._session,
+        "post",
+        _fake_post_factory(expected),
+    )
+    assert embeddings.embed_texts(["a", "b"]) == expected

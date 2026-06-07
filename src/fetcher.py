@@ -403,9 +403,6 @@ def save_video_list(videos: list[dict[str, Any]], path: Path | None = None) -> P
     return path
 
 
-def load_video_list(path: Path | None = None) -> list[dict[str, Any]]:
-    """Load a previously saved video list.
-
 def save_fetch_result(
     fresh: list[dict[str, Any]],
     path: Path | None = None,
@@ -430,13 +427,18 @@ def save_fetch_result(
     return fresh
 
 
+def load_video_list(path: Path | None = None) -> list[dict[str, Any]]:
+    """Load a previously saved video list.
+
     Tolerates a missing, empty, or corrupt cache file by returning an empty
-    list instead of raising.
+    list. A genuine I/O error (e.g. permission denied) on an existing file is
+    NOT swallowed — it propagates, so callers don't mistake an unreadable cache
+    for an empty one and then overwrite the good history.
     """
     path = path or DATA_DIR / "videos.json"
     if not path.exists():
         return []
     try:
         return json.loads(path.read_text())
-    except (json.JSONDecodeError, ValueError, OSError):
+    except (json.JSONDecodeError, ValueError):
         return []

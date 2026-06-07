@@ -6,12 +6,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import json
+import subprocess
+
 from src import fetcher
 from src.fetcher import (
     _parse_relative_time,
     fetch_video_list,
     load_video_list,
     merge_video_lists,
+    save_fetch_result,
     save_video_list,
 )
 
@@ -126,14 +130,14 @@ def test_fetch_video_list_upload_date_drives_published_date(monkeypatch):
     pub = datetime.fromisoformat(results[0]["published_date"])
     expected = datetime.strptime(recent, "%Y%m%d").replace(tzinfo=timezone.utc)
     assert pub == expected
-
-
-def test_fetch_video_list_scrapetube_relative_text_still_works(monkeypatch):
-    """Entries without upload_date (scrapetube path) fall back to relative text."""
     # published_text must be regenerated from upload_date too, not left as the
     # mismatched "2 years ago" — the two fields must not diverge.
     assert "year" not in results[0]["published_text"], results[0]["published_text"]
     assert results[0]["published_text"] == fetcher._format_relative_time(expected)
+
+
+def test_fetch_video_list_scrapetube_relative_text_still_works(monkeypatch):
+    """Entries without upload_date (scrapetube path) fall back to relative text."""
     raw = [
         {
             "videoId": "REL789",
@@ -222,3 +226,109 @@ def test_merge_empty_inputs():
     merged, new_only = merge_video_lists([], [])
     assert merged == []
     assert new_only == []
+
+
+# ── R1: save_fetch_result guard (shared by run_fetch and the web worker) ─────
+
+
+def test_save_fetch_result_keeps_cache_on_empty_fetch(tmp_path):
+    """An empty fetch must NOT overwrite a populated cache; cache is returned."""
+    path = tmp_path / "videos.json"
+    cached = [{"video_id": c} for c in "abcde"]
+    save_video_list(cached, path=path)
+
+    result = save_fetch_result([], path=path)
+
+    assert [v["video_id"] for v in result] == list("abcde")
+    # On-disk cache is untouched.
+    assert [v["video_id"] for v in load_video_list(path=path)] == list("abcde")
+
+
+def test_save_fetch_result_keeps_cache_on_truncated_fetch(tmp_path):
+    """A fetch < 50% of the cached size is treated as likely-incomplete."""
+    path = tmp_path / "videos.json"
+    cached = [{"video_id": str(i)} for i in range(10)]
+    save_video_list(cached, path=path)
+
+    truncated = [{"video_id": "0"}, {"video_id": "1"}]  # 20%
+    result = save_fetch_result(truncated, path=path)
+
+    assert len(result) == 10
+    assert len(load_video_list(path=path)) == 10
+
+
+def test_save_fetch_result_saves_plausible_fetch(tmp_path):
+    """A plausibly-complete fetch overwrites and is returned."""
+    path = tmp_path / "videos.json"
+    save_video_list([{"video_id": "a"}, {"video_id": "b"}], path=path)
+
+    fresh = [{"video_id": str(i)} for i in range(5)]
+    result = save_fetch_result(fresh, path=path)
+
+    assert [v["video_id"] for v in result] == [str(i) for i in range(5)]
+    assert [v["video_id"] for v in load_video_list(path=path)] == [str(i) for i in range(5)]
+
+
+def test_save_fetch_result_saves_when_no_cache(tmp_path):
+    """With no existing cache, even a small/empty fetch is persisted as-is."""
+    path = tmp_path / "videos.json"
+    fresh = [{"video_id": "only"}]
+    result = save_fetch_result(fresh, path=path)
+    assert [v["video_id"] for v in result] == ["only"]
+    assert [v["video_id"] for v in load_video_list(path=path)] == ["only"]
+
+
+# ── R1: load_video_list must not swallow real I/O errors ─────────────────────
+
+
+def test_load_video_list_propagates_oserror(tmp_path, monkeypatch):
+    """A genuine read failure on an existing file must NOT be masked as []."""
+    path = tmp_path / "videos.json"
+    save_video_list([{"video_id": "x"}], path=path)
+
+    def boom(*a, **k):
+        raise OSError("disk on fire")
+
+    # Patch Path.read_text so the existing-file read raises a real I/O error.
+    monkeypatch.setattr(fetcher.Path, "read_text", boom)
+    with pytest.raises(OSError):
+        load_video_list(path=path)
+
+
+# ── R1: save_video_list cleans up the temp file when the write fails ─────────
+
+
+def test_save_video_list_cleans_temp_on_failure(tmp_path, monkeypatch):
+    """If the atomic write fails mid-way, no *.tmp leftover should remain."""
+    path = tmp_path / "videos.json"
+
+    def boom(*a, **k):
+        raise RuntimeError("fsync failed")
+
+    monkeypatch.setattr(fetcher.os, "fsync", boom)
+    with pytest.raises(RuntimeError):
+        save_video_list([{"video_id": "x"}], path=path)
+
+    leftovers = [p.name for p in tmp_path.iterdir()]
+    assert leftovers == [], f"temp file not cleaned up: {leftovers}"
+
+
+# ── R1: channel-fetch subprocess timeout is passed and TimeoutExpired skips ──
+
+
+def test_yt_dlp_fetch_passes_timeout_and_skips_on_timeout(monkeypatch):
+    """A hung yt-dlp (TimeoutExpired) is caught per-tab and yields no entries."""
+    seen = {}
+
+    def fake_run(cmd, *a, **k):
+        seen["timeout"] = k.get("timeout")
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=k.get("timeout"))
+
+    monkeypatch.setattr(fetcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(fetcher.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+
+    out = fetcher._fetch_channel_videos_with_yt_dlp(
+        "https://youtube.com/c/x", include_streams=False
+    )
+    assert out == [], "a timed-out fetch must be skipped, not raised"
+    assert seen["timeout"] is not None and seen["timeout"] > 0

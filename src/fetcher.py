@@ -51,12 +51,19 @@ def _parse_relative_time(text: str) -> datetime | None:
     """
     text = text.lower().strip()
     now = datetime.now(timezone.utc)
+
+    # "just now" / "a moment ago" -> treat as the current instant.
+    if "just now" in text or "moment" in text:
+        return now
+
     for unit, delta_fn in [
         ("year", lambda n: timedelta(days=n * 365)),
         ("month", lambda n: timedelta(days=n * 30)),
         ("week", lambda n: timedelta(weeks=n)),
         ("day", lambda n: timedelta(days=n)),
         ("hour", lambda n: timedelta(hours=n)),
+        ("minute", lambda n: timedelta(minutes=n)),
+        ("second", lambda n: timedelta(seconds=n)),
     ]:
         if unit in text:
             # Extract the first integer token (skips leading words like "Streamed")
@@ -66,6 +73,10 @@ def _parse_relative_time(text: str) -> datetime | None:
                     return now - delta_fn(num)
                 except ValueError:
                     continue
+            # No integer token found, but a unit word is present. YouTube uses
+            # "a year ago" / "an hour ago" for a single unit -> treat as 1.
+            if "a" in text.split() or "an" in text.split():
+                return now - delta_fn(1)
             return None
 
     # Support ISO-style dates in fallback mode

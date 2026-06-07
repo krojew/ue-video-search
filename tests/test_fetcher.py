@@ -11,6 +11,7 @@ from src.fetcher import (
     _parse_relative_time,
     fetch_video_list,
     load_video_list,
+    merge_video_lists,
     save_video_list,
 )
 
@@ -185,3 +186,35 @@ def test_save_leaves_no_temp_files(tmp_path):
     # Only the final file should remain — no leftover *.tmp artifacts.
     leftovers = [p.name for p in tmp_path.iterdir() if p.name != "videos.json"]
     assert leftovers == []
+
+
+# ── BUG 4: merge_video_lists skips entries missing video_id ──────────────────
+
+
+def test_merge_skips_entries_missing_video_id():
+    existing = [
+        {"video_id": "a", "title": "A"},
+        {"title": "no id in existing"},  # missing key
+    ]
+    incoming = [
+        {"video_id": "b", "title": "B"},
+        {"title": "no id in incoming"},  # missing key
+        {"video_id": "", "title": "empty id"},  # falsy id
+        {"video_id": "a", "title": "A dup"},  # already existing
+    ]
+    merged, new_only = merge_video_lists(existing, incoming)
+
+    merged_ids = [v.get("video_id") for v in merged]
+    # No KeyError, and only truthy-id entries survive.
+    assert "a" in merged_ids
+    assert "b" in merged_ids
+    assert "" not in merged_ids
+    assert None not in merged_ids
+    # new_only contains only genuinely new, truthy-id entries.
+    assert [v["video_id"] for v in new_only] == ["b"]
+
+
+def test_merge_empty_inputs():
+    merged, new_only = merge_video_lists([], [])
+    assert merged == []
+    assert new_only == []

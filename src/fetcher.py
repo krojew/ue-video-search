@@ -344,16 +344,25 @@ def merge_video_lists(
     Returns (merged_list, new_only) where new_only contains videos
     that were not in the existing list.
     """
-    existing_ids = {v["video_id"] for v in existing}
-    new_only = [v for v in incoming if v["video_id"] not in existing_ids]
+    existing_ids = {
+        v["video_id"] for v in existing if v.get("video_id")
+    }
+    new_only = [
+        v for v in incoming
+        if v.get("video_id") and v["video_id"] not in existing_ids
+    ]
 
-    # Build merged list: new videos first (newest), then existing
+    # Build merged list: new videos first (newest), then existing.
+    # Entries lacking a truthy "video_id" are skipped rather than aborting
+    # the whole merge with a KeyError.
     merged_ids: set[str] = set()
     merged: list[dict[str, Any]] = []
     for v in incoming + existing:
-        if v["video_id"] not in merged_ids:
-            merged_ids.add(v["video_id"])
-            merged.append(v)
+        vid = v.get("video_id")
+        if not vid or vid in merged_ids:
+            continue
+        merged_ids.add(vid)
+        merged.append(v)
 
     return merged, new_only
 

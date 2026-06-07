@@ -552,25 +552,26 @@
         return;
       }
 
-      let html = `<div class="results-info">${data.total_results} matching segments across ${data.videos.length} video(s)</div>`;
+      let html = `<div class="results-info">${escHtml(data.total_results)} matching segments across ${data.videos.length} video(s)</div>`;
 
       for (const video of data.videos) {
-        const thumbUrl = `https://img.youtube.com/vi/${video.video_id}/mqdefault.jpg`;
+        const thumbUrl = `https://img.youtube.com/vi/${encodeURIComponent(video.video_id)}/mqdefault.jpg`;
         html += `<div class="video-card">
           <div class="video-header">
-            <img class="video-thumb" src="${thumbUrl}" alt="" loading="lazy">
+            <img class="video-thumb" src="${escAttr(thumbUrl)}" alt="" loading="lazy">
             <div class="video-meta">
-              <div class="video-title"><a href="${video.video_url}" target="_blank" rel="noopener">${escHtml(video.video_title)}</a></div>
+              <div class="video-title"><a href="${escAttr(video.video_url)}" target="_blank" rel="noopener">${escHtml(video.video_title)}</a></div>
               <div class="video-link">${escHtml(video.video_url)}</div>
             </div>
           </div>`;
 
         for (const seg of video.segments) {
-          const scorePct = (seg.score * 100).toFixed(1);
-          const barWidth = Math.max(10, seg.score * 100);
+          const score = Number(seg.score) || 0;
+          const scorePct = (score * 100).toFixed(1);
+          const barWidth = Math.max(10, score * 100);
           html += `<div class="segment">
             <div class="segment-time">
-              <a href="${seg.timestamped_url}" target="_blank" rel="noopener">${escHtml(seg.time_range)}</a>
+              <a href="${escAttr(seg.timestamped_url)}" target="_blank" rel="noopener">${escHtml(seg.time_range)}</a>
             </div>
             <div class="segment-body">
               <div class="segment-score">
@@ -754,6 +755,20 @@
     const d = document.createElement('div');
     d.textContent = s;
     return d.innerHTML;
+  }
+
+  // Escape a value for safe insertion into a double-quoted HTML attribute.
+  // textContent->innerHTML escapes & < > but NOT quotes, so attributes need
+  // explicit encoding of " and ' to prevent breaking out of the attribute.
+  const ATTR_ESCAPE_MAP = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  };
+  function escAttr(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ATTR_ESCAPE_MAP[c]);
   }
 })();
 </script>

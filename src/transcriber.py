@@ -38,18 +38,32 @@ def download_audio(video_id: str, url: str) -> Path:
     # rather than a transcode. Skipping the WAV resample to 16 kHz mono saves
     # bandwidth (~10x smaller files) and ffmpeg time; Whisper resamples
     # internally on load.
-    subprocess.run(
-        [
-            yt_dlp_bin,
-            "--no-playlist",
-            "-x",
-            "--audio-format", "opus",
-            "-o", out_path,
-            url,
-        ],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                yt_dlp_bin,
+                "--no-playlist",
+                "-x",
+                "--audio-format", "opus",
+                "-o", str(out_path),
+                url,
+            ],
+            check=True,
+            capture_output=True,
+            timeout=600,
+        )
+    except subprocess.CalledProcessError as exc:
+        # Surface yt-dlp's own diagnostic rather than an opaque non-zero exit.
+        stderr = exc.stderr or b""
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"yt-dlp failed for {video_id} (exit {exc.returncode}): {stderr.strip()}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"yt-dlp timed out after {exc.timeout}s downloading {video_id}"
+        ) from exc
     return out_path
 
 

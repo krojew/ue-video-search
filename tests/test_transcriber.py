@@ -4,6 +4,8 @@ No real yt-dlp, Whisper, network or GPU are touched — every heavy dependency
 is monkeypatched, and AUDIO_DIR / TRANSCRIPT_DIR are redirected at tmp dirs.
 """
 
+import subprocess
+
 import pytest
 
 import src.transcriber as transcriber
@@ -123,3 +125,51 @@ def test_load_transcript_corrupt_returns_none(dirs):
     _, transcript_dir = dirs
     (transcript_dir / "vidbad.json").write_text("{ this is not valid json ")
     assert transcriber.load_transcript("vidbad") is None
+
+
+# ── BUG 4: yt-dlp timeout + stderr surfacing ──────────────────────────────
+
+
+def test_download_audio_called_process_error_surfaces_stderr(dirs, monkeypatch):
+    """CalledProcessError must become a RuntimeError carrying yt-dlp's stderr."""
+    monkeypatch.setattr(transcriber.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+
+    def _raise(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args[0], stderr=b"boom")
+
+    monkeypatch.setattr(transcriber.subprocess, "run", _raise)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        transcriber.download_audio("viderr", "http://x")
+
+
+def test_download_audio_timeout_raises_runtime_error(dirs, monkeypatch):
+    """TimeoutExpired must become a clear RuntimeError."""
+    monkeypatch.setattr(transcriber.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+
+    def _raise(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], timeout=600)
+
+    monkeypatch.setattr(transcriber.subprocess, "run", _raise)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        transcriber.download_audio("vidto", "http://x")
+
+
+def test_download_audio_passes_timeout(dirs, monkeypatch):
+    """The subprocess.run call must include a timeout."""
+    monkeypatch.setattr(transcriber.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+    captured = {}
+
+    def _run(*args, **kwargs):
+        captured.update(kwargs)
+
+        class _R:
+            pass
+
+        return _R()
+
+    monkeypatch.setattr(transcriber.subprocess, "run", _run)
+
+    transcriber.download_audio("vidok", "http://x")
+    assert captured.get("timeout") is not None

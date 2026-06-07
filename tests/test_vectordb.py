@@ -7,6 +7,7 @@ refuse to run against the production collection name `ue_videos`, and skip
 gracefully when the live server is unreachable.
 """
 import os
+import random
 from uuid import uuid4
 
 import pytest
@@ -14,7 +15,13 @@ import pytest
 from src import vectordb
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
+from qdrant_client.models import (
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchValue,
+    VectorParams,
+)
 
 
 # ── Live-Qdrant integration support ───────────────────────────────────────
@@ -122,3 +129,86 @@ def test_ensure_collection_ok_when_dim_matches(live_collection):
     )
     # Matching dimension: must not raise.
     vectordb.ensure_collection(client)
+
+
+# ── BUG 3 (integration): re-ingest must replace, not orphan, old chunks ────
+
+
+def _rand_vec(dim=LIVE_EMBEDDING_DIM):
+    return [random.random() for _ in range(dim)]
+
+
+def _count_for_video(client, name, video_id):
+    return client.count(
+        collection_name=name,
+        count_filter=Filter(
+            must=[
+                FieldCondition(key="video_id", match=MatchValue(value=video_id))
+            ]
+        ),
+        exact=True,
+    ).count
+
+
+def test_reindex_replaces_old_chunks(live_collection):
+    client, name = live_collection
+    vid = "vtest"
+
+    # First ingest: chunks at starts [0, 120].
+    chunks_v1 = [
+        {"start": 0, "end": 120, "text": "first"},
+        {"start": 120, "end": 240, "text": "second"},
+    ]
+    emb_v1 = [_rand_vec(), _rand_vec()]
+    vectordb.upsert_chunks(vid, "title", "url", chunks_v1, emb_v1, client=client)
+    assert _count_for_video(client, name, vid) == 2
+
+    # Re-ingest with DIFFERENT windowing: starts [0, 100, 200].
+    chunks_v2 = [
+        {"start": 0, "end": 100, "text": "a"},
+        {"start": 100, "end": 200, "text": "b"},
+        {"start": 200, "end": 300, "text": "c"},
+    ]
+    emb_v2 = [_rand_vec(), _rand_vec(), _rand_vec()]
+    vectordb.upsert_chunks(vid, "title", "url", chunks_v2, emb_v2, client=client)
+
+    # Exactly 3 points: the old start=120 orphan must be gone.
+    assert _count_for_video(client, name, vid) == 3
+
+    # And no point with start=120 should remain.
+    points, _ = client.scroll(
+        collection_name=name,
+        scroll_filter=Filter(
+            must=[FieldCondition(key="video_id", match=MatchValue(value=vid))]
+        ),
+        limit=100,
+        with_payload=True,
+    )
+    starts = sorted((p.payload or {}).get("start") for p in points)
+    assert starts == [0, 100, 200]
+
+
+def test_reindex_does_not_touch_other_videos(live_collection):
+    client, name = live_collection
+    # Two distinct videos; re-ingesting one must not delete the other's points.
+    vectordb.upsert_chunks(
+        "vid_a", "ta", "ua",
+        [{"start": 0, "end": 10, "text": "a"}],
+        [_rand_vec()],
+        client=client,
+    )
+    vectordb.upsert_chunks(
+        "vid_b", "tb", "ub",
+        [{"start": 0, "end": 10, "text": "b"}],
+        [_rand_vec()],
+        client=client,
+    )
+    # Re-ingest vid_a with new windowing.
+    vectordb.upsert_chunks(
+        "vid_a", "ta", "ua",
+        [{"start": 5, "end": 15, "text": "a2"}],
+        [_rand_vec()],
+        client=client,
+    )
+    assert _count_for_video(client, name, "vid_a") == 1
+    assert _count_for_video(client, name, "vid_b") == 1

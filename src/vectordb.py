@@ -115,6 +115,25 @@ def upsert_chunks(
     client = client or get_client()
     ensure_collection(client)
 
+    # Delete any existing points for THIS video before inserting, so
+    # re-ingesting is idempotent/replacing. Point ids are derived from the
+    # chunk start times, so if the chunk windowing changes the new points
+    # get new ids and the old ones would otherwise linger as stale
+    # duplicates and pollute search. The filter is scoped to this single
+    # video_id only.
+    client.delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=FilterSelector(
+            filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="video_id", match=MatchValue(value=video_id)
+                    )
+                ]
+            )
+        ),
+    )
+
     points = []
     for chunk, vector in zip(chunks, embeddings):
         point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{video_id}:{chunk['start']}"))

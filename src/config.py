@@ -22,9 +22,11 @@ def _env_int(name, default, *, min_value=None, max_value=None):
     try:
         value = int(raw)
     except (TypeError, ValueError):
+        # `from None` suppresses the chained int() ValueError so the operator
+        # sees only the clear, actionable ConfigError message.
         raise ConfigError(
             f"{name} must be an integer, got {raw!r}."
-        )
+        ) from None
     if min_value is not None and value < min_value:
         raise ConfigError(
             f"{name} must be >= {min_value}, got {value}."

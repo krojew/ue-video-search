@@ -158,10 +158,16 @@ def search_videos(query: str, top_k: int = 10) -> list[dict[str, Any]]:
             raise RuntimeError("No video data has been indexed yet. Please run an ingest first.") from e
         raise RuntimeError(f"Search failed: {e}") from e
 
-    title_keywords_lower = {kw.lower() for kw in _extract_keywords(query)}
+    query_keywords = _extract_keywords(query)
     for result in raw_results:
-        title_lower = result["video_title"].lower()
-        title_matches = sum(1 for kw in title_keywords_lower if kw in title_lower)
+        # Match keywords on word boundaries, not substrings: tokenize the title
+        # the same way _extract_keywords tokenizes the query, then count how many
+        # query keywords appear as whole tokens (set intersection). This avoids
+        # false positives like "ai" matching "chain"/"detailing".
+        title_tokens = set(
+            re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", result["video_title"].lower())
+        )
+        title_matches = len(query_keywords & title_tokens)
         if title_matches > 0:
             result["score"] = result["score"] + (_TITLE_BOOST_PER_KEYWORD * title_matches)
 

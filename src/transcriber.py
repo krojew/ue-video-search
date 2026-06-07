@@ -241,12 +241,13 @@ def process_video(
     audio_path = download_audio(video_id, url)
     try:
         segments = transcribe_audio(audio_path, model=model)
-        # Do NOT persist an empty transcript. transcribe_audio returns [] both
-        # for genuinely-silent videos and for upstream failures; caching []
-        # would make load_transcript hand back [] forever (it is `not None`),
-        # permanently blocking re-ingest of a recoverable failure. Skipping the
-        # save means truly-silent videos are retried every run — an acceptable
-        # cost versus losing recoverable ones.
+        # Do NOT persist an empty transcript. transcribe_audio returns [] only
+        # for genuinely-silent videos (empty VAD output); genuine failures
+        # (model load, decode errors) RAISE and propagate out through the
+        # finally below, so they never reach save_transcript and are never
+        # cached. Caching [] would make load_transcript hand back [] forever
+        # (it is `not None`), so we skip the save for silence too — the only
+        # cost is that truly-silent videos are retried every run.
         if segments:
             save_transcript(video_id, segments)
     finally:

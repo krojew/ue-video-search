@@ -84,6 +84,31 @@ def test_process_video_no_cleanup_when_disabled(dirs, monkeypatch):
     assert opus.exists()
 
 
+def test_process_video_cleans_audio_when_transcription_raises(dirs, monkeypatch):
+    """The finally block must delete the audio even when transcribe_audio RAISES.
+
+    Regression guard for the headline contract: moving the unlink out of the
+    `finally` (into the try, or after save) would leak audio on any failure.
+    """
+    audio_dir, transcript_dir = dirs
+    opus = audio_dir / "vid_boom.opus"
+    opus.write_bytes(b"fake audio")
+
+    monkeypatch.setattr(transcriber, "download_audio", lambda vid, url: opus)
+
+    def boom(path, model=None):
+        raise RuntimeError("decode failed")
+
+    monkeypatch.setattr(transcriber, "transcribe_audio", boom)
+
+    with pytest.raises(RuntimeError):
+        transcriber.process_video("vid_boom", "http://x")
+
+    # finally ran: audio deleted, and the failure was NOT cached as a transcript.
+    assert not opus.exists(), "audio must be cleaned up even when transcription raises"
+    assert not (transcript_dir / "vid_boom.json").exists()
+
+
 # ── BUG 2: empty transcripts must not be cached ───────────────────────────
 
 
@@ -120,8 +145,9 @@ def test_save_transcript_round_trips(dirs):
 def test_save_transcript_leaves_no_temp_file(dirs):
     _, transcript_dir = dirs
     transcriber.save_transcript("vidtmp", [{"start": 0.0, "end": 1.0, "text": "x"}])
-    assert (transcript_dir / "vidtmp.json").exists()
-    assert not (transcript_dir / "vidtmp.json.tmp").exists()
+    # mkstemp inserts a random infix, so assert on the full directory contents
+    # rather than a fixed '.tmp' name that mkstemp would never produce.
+    assert [p.name for p in transcript_dir.iterdir()] == ["vidtmp.json"]
 
 
 def test_save_transcript_cleans_temp_on_failure(dirs, monkeypatch):

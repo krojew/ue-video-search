@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -51,12 +53,19 @@ def _parse_relative_time(text: str) -> datetime | None:
     """
     text = text.lower().strip()
     now = datetime.now(timezone.utc)
+
+    # "just now" / "a moment ago" -> treat as the current instant.
+    if "just now" in text or "moment" in text:
+        return now
+
     for unit, delta_fn in [
         ("year", lambda n: timedelta(days=n * 365)),
         ("month", lambda n: timedelta(days=n * 30)),
         ("week", lambda n: timedelta(weeks=n)),
         ("day", lambda n: timedelta(days=n)),
         ("hour", lambda n: timedelta(hours=n)),
+        ("minute", lambda n: timedelta(minutes=n)),
+        ("second", lambda n: timedelta(seconds=n)),
     ]:
         if unit in text:
             # Extract the first integer token (skips leading words like "Streamed")
@@ -66,6 +75,10 @@ def _parse_relative_time(text: str) -> datetime | None:
                     return now - delta_fn(num)
                 except ValueError:
                     continue
+            # No integer token found, but a unit word is present. YouTube uses
+            # "a year ago" / "an hour ago" for a single unit -> treat as 1.
+            if "a" in text.split() or "an" in text.split():
+                return now - delta_fn(1)
             return None
 
     # Support ISO-style dates in fallback mode
@@ -156,6 +169,10 @@ def _fetch_channel_videos_with_yt_dlp(
                 capture_output=True,
                 text=True,
                 check=True,
+                # Bound the fetch so a hung yt-dlp surfaces as
+                # TimeoutExpired (caught below) and this tab is skipped
+                # instead of blocking the whole run forever.
+                timeout=120,
             )
             payload = json.loads(result.stdout)
         except Exception:
@@ -284,15 +301,22 @@ def fetch_video_list(
         if duration_secs is None or duration_secs < MIN_DURATION_SECONDS:
             continue
 
-        # Publish date (relative)
+        # Publish date. Prefer the precise `upload_date` (YYYYMMDD) when the
+        # yt-dlp path provides it, since the relative text ("2 days ago") loses
+        # precision and can flip include/exclude decisions near the cutoff.
+        # The scrapetube path only has relative text, so fall back to that.
         pub_text = v.get("publishedTimeText", {}).get("simpleText", "")
-        pub_date = _parse_relative_time(pub_text) if pub_text else None
-        if pub_date is None and v.get("upload_date"):
+        pub_date = None
+        if v.get("upload_date"):
             try:
-                pub_date = datetime.strptime(v["upload_date"], "%Y%m%d").replace(tzinfo=timezone.utc)
+                pub_date = datetime.strptime(
+                    v["upload_date"], "%Y%m%d"
+                ).replace(tzinfo=timezone.utc)
                 pub_text = pub_text or _format_relative_time(pub_date)
-            except ValueError:
+            except (ValueError, TypeError):
                 pub_date = None
+        if pub_date is None and pub_text:
+            pub_date = _parse_relative_time(pub_text)
 
         if pub_date and pub_date < cutoff:
             continue
@@ -324,31 +348,68 @@ def merge_video_lists(
     Returns (merged_list, new_only) where new_only contains videos
     that were not in the existing list.
     """
-    existing_ids = {v["video_id"] for v in existing}
-    new_only = [v for v in incoming if v["video_id"] not in existing_ids]
+    existing_ids = {
+        v["video_id"] for v in existing if v.get("video_id")
+    }
+    new_only = [
+        v for v in incoming
+        if v.get("video_id") and v["video_id"] not in existing_ids
+    ]
 
-    # Build merged list: new videos first (newest), then existing
+    # Build merged list: new videos first (newest), then existing.
+    # Entries lacking a truthy "video_id" are skipped rather than aborting
+    # the whole merge with a KeyError.
     merged_ids: set[str] = set()
     merged: list[dict[str, Any]] = []
     for v in incoming + existing:
-        if v["video_id"] not in merged_ids:
-            merged_ids.add(v["video_id"])
-            merged.append(v)
+        vid = v.get("video_id")
+        if not vid or vid in merged_ids:
+            continue
+        merged_ids.add(vid)
+        merged.append(v)
 
     return merged, new_only
 
 
 def save_video_list(videos: list[dict[str, Any]], path: Path | None = None) -> Path:
-    """Persist the video list to JSON."""
+    """Persist the video list to JSON atomically.
+
+    Writes to a temp file in the same directory and then ``os.replace()``s it
+    into place, which is atomic on POSIX. This guarantees that a crash mid-write
+    leaves the previous cache intact rather than a truncated/corrupt file.
+    """
     path = path or DATA_DIR / "videos.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(videos, indent=2, default=str))
+    data = json.dumps(videos, indent=2, default=str)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        # Clean up the temp file if anything went wrong before the replace.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return path
 
 
 def load_video_list(path: Path | None = None) -> list[dict[str, Any]]:
-    """Load a previously saved video list."""
+    """Load a previously saved video list.
+
+    Tolerates a missing, empty, or corrupt cache file by returning an empty
+    list instead of raising.
+    """
     path = path or DATA_DIR / "videos.json"
     if not path.exists():
         return []
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, ValueError, OSError):
+        return []

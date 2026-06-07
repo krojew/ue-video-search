@@ -169,6 +169,10 @@ def _fetch_channel_videos_with_yt_dlp(
                 capture_output=True,
                 text=True,
                 check=True,
+                # Bound the fetch so a hung yt-dlp surfaces as
+                # TimeoutExpired (caught below) and this tab is skipped
+                # instead of blocking the whole run forever.
+                timeout=120,
             )
             payload = json.loads(result.stdout)
         except Exception:

@@ -145,6 +145,7 @@ def _run_ingest(
 
     try:
         # ── Fetch ──
+        skip_indexed = not reindex
         if incremental:
             cached = load_video_list()
             fresh = fetch_video_list(
@@ -155,9 +156,15 @@ def _run_ingest(
             )
             merged, new_only = merge_video_lists(cached, fresh)
             save_video_list(merged)
-            videos = new_only
             _status.new_videos_found = len(new_only)
             _status.message = f"Found {len(new_only)} new video(s) ({len(merged)} total)"
+            # Candidate pool: when skip-indexed is on, consider the *whole*
+            # merged list so the index diff below also picks up previously
+            # cached videos that failed to ingest (absent from Qdrant). Cache
+            # membership alone must NOT mark a video as done — Qdrant is the
+            # source of truth. With reindex (skip_indexed off) there is no
+            # index diff, so fall back to processing only the brand-new ones.
+            videos = merged if skip_indexed else new_only
         else:
             videos = fetch_video_list(
                 skip_uefn=skip_uefn,
@@ -181,7 +188,6 @@ def _run_ingest(
         client = get_client()
         ensure_collection(client)
 
-        skip_indexed = not reindex
         if skip_indexed:
             indexed_ids = list_indexed_video_ids(client)
             to_process = [v for v in videos if v["video_id"] not in indexed_ids]

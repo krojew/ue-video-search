@@ -216,15 +216,23 @@ def run_ingest_new_only(
     skip_archvis: bool = True,
     include_streams: bool = True,
 ) -> None:
-    """Incremental ingest: fetch new videos from the channel and only process those."""
-    _all, new_only = run_fetch_incremental(
+    """Incremental ingest: process videos that are not yet in the index.
+
+    The set of videos to process is (new videos) ∪ (cached videos missing
+    from the Qdrant index). Cache membership is NOT used as the sole source
+    of truth for "already done" — a video that was merged into the cache but
+    failed to ingest stays eligible for retry because it is still absent from
+    Qdrant. ``_ingest_videos(skip_indexed=True)`` performs the index diff, so
+    passing the full merged list yields exactly that union.
+    """
+    merged, _new_only = run_fetch_incremental(
         skip_uefn=skip_uefn,
         skip_automotive=skip_automotive,
         skip_archvis=skip_archvis,
         include_streams=include_streams,
     )
 
-    if not new_only:
-        return
-
-    _ingest_videos(new_only, skip_indexed=True, label="Processing new videos")
+    # Pass the full merged list (not just new_only). The skip-indexed filter
+    # inside _ingest_videos keeps only videos absent from Qdrant, which is the
+    # union of brand-new videos and previously-cached-but-unindexed ones.
+    _ingest_videos(merged, skip_indexed=True, label="Processing new videos")

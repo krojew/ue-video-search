@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -171,18 +172,33 @@ def transcribe_audio(audio_path: Path, model: WhisperModel | None = None) -> lis
 
 
 def save_transcript(video_id: str, segments: list[dict[str, Any]]) -> Path:
-    """Save transcript segments to a JSON file atomically.
+    """Save transcript segments to a JSON file atomically and durably.
 
-    Write to a temp file in the same directory, then os.replace() it into
-    place. os.replace is atomic on the same filesystem, so a crash mid-write
-    can never leave a half-written (corrupt) JSON file behind — a reader sees
-    either the old complete file or the new complete one.
+    Writes to a unique temp file in the same directory, flushes + fsyncs it,
+    then os.replace()s it into place. os.replace is atomic on the same
+    filesystem, so a reader always sees either the old complete file or the new
+    complete one (no torn reads), and the fsync narrows the power-loss window in
+    which the rename could land before the data. The temp file is cleaned up if
+    anything fails before the replace.
     """
     TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     path = TRANSCRIPT_DIR / f"{video_id}.json"
-    tmp_path = TRANSCRIPT_DIR / f"{video_id}.json.tmp"
-    tmp_path.write_text(json.dumps(segments, indent=2))
-    os.replace(tmp_path, path)
+    data = json.dumps(segments, indent=2)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(TRANSCRIPT_DIR), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return path
 
 

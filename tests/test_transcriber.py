@@ -103,6 +103,9 @@ def test_empty_transcript_not_cached_and_retried(dirs, monkeypatch):
     assert not (transcript_dir / "vid_empty.json").exists()
     # A subsequent run sees no cache and would process again.
     assert transcriber.load_transcript("vid_empty") is None
+    # Audio cleanup must still run on the empty-transcript path (cleanup is
+    # independent of whether the transcript was cached).
+    assert not opus.exists(), "audio must be cleaned up even for an empty transcript"
 
 
 # ── BUG 3: atomic save + corruption-tolerant load ─────────────────────────
@@ -119,6 +122,21 @@ def test_save_transcript_leaves_no_temp_file(dirs):
     transcriber.save_transcript("vidtmp", [{"start": 0.0, "end": 1.0, "text": "x"}])
     assert (transcript_dir / "vidtmp.json").exists()
     assert not (transcript_dir / "vidtmp.json.tmp").exists()
+
+
+def test_save_transcript_cleans_temp_on_failure(dirs, monkeypatch):
+    """If the atomic write fails mid-way, no *.tmp leftover should remain."""
+    _, transcript_dir = dirs
+
+    def boom(*a, **k):
+        raise RuntimeError("fsync failed")
+
+    monkeypatch.setattr(transcriber.os, "fsync", boom)
+    with pytest.raises(RuntimeError):
+        transcriber.save_transcript("vidfail", [{"start": 0.0, "end": 1.0, "text": "x"}])
+
+    leftovers = [p.name for p in transcript_dir.iterdir()]
+    assert leftovers == [], f"temp file not cleaned up: {leftovers}"
 
 
 def test_load_transcript_corrupt_returns_none(dirs):

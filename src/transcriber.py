@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -156,19 +157,34 @@ def transcribe_audio(audio_path: Path, model: WhisperModel | None = None) -> lis
 
 
 def save_transcript(video_id: str, segments: list[dict[str, Any]]) -> Path:
-    """Save transcript segments to a JSON file."""
+    """Save transcript segments to a JSON file atomically.
+
+    Write to a temp file in the same directory, then os.replace() it into
+    place. os.replace is atomic on the same filesystem, so a crash mid-write
+    can never leave a half-written (corrupt) JSON file behind — a reader sees
+    either the old complete file or the new complete one.
+    """
     TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
     path = TRANSCRIPT_DIR / f"{video_id}.json"
-    path.write_text(json.dumps(segments, indent=2))
+    tmp_path = TRANSCRIPT_DIR / f"{video_id}.json.tmp"
+    tmp_path.write_text(json.dumps(segments, indent=2))
+    os.replace(tmp_path, path)
     return path
 
 
 def load_transcript(video_id: str) -> list[dict[str, Any]] | None:
-    """Load a previously saved transcript, or None if not found."""
+    """Load a previously saved transcript, or None if not found.
+
+    A corrupt/unparseable file is treated as not-cached (returns None) so the
+    video gets re-processed rather than raising on every load.
+    """
     path = TRANSCRIPT_DIR / f"{video_id}.json"
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def process_video(

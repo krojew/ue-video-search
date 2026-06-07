@@ -101,3 +101,25 @@ def test_empty_transcript_not_cached_and_retried(dirs, monkeypatch):
     assert not (transcript_dir / "vid_empty.json").exists()
     # A subsequent run sees no cache and would process again.
     assert transcriber.load_transcript("vid_empty") is None
+
+
+# ── BUG 3: atomic save + corruption-tolerant load ─────────────────────────
+
+
+def test_save_transcript_round_trips(dirs):
+    segments = [{"start": 0.0, "end": 2.5, "text": "hello world"}]
+    transcriber.save_transcript("vidrt", segments)
+    assert transcriber.load_transcript("vidrt") == segments
+
+
+def test_save_transcript_leaves_no_temp_file(dirs):
+    _, transcript_dir = dirs
+    transcriber.save_transcript("vidtmp", [{"start": 0.0, "end": 1.0, "text": "x"}])
+    assert (transcript_dir / "vidtmp.json").exists()
+    assert not (transcript_dir / "vidtmp.json.tmp").exists()
+
+
+def test_load_transcript_corrupt_returns_none(dirs):
+    _, transcript_dir = dirs
+    (transcript_dir / "vidbad.json").write_text("{ this is not valid json ")
+    assert transcriber.load_transcript("vidbad") is None

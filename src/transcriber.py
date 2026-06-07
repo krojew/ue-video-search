@@ -171,23 +171,38 @@ def load_transcript(video_id: str) -> list[dict[str, Any]] | None:
     return json.loads(path.read_text())
 
 
-def process_video(video_id: str, url: str, model: WhisperModel | None = None) -> list[dict[str, Any]]:
-    """Full pipeline: download audio → transcribe → save. Returns segments."""
+def process_video(
+    video_id: str,
+    url: str,
+    model: WhisperModel | None = None,
+    cleanup_audio: bool = True,
+) -> list[dict[str, Any]]:
+    """Full pipeline: download audio → transcribe → save. Returns segments.
+
+    When ``cleanup_audio`` is True (the default), the downloaded ``.opus`` file
+    is deleted after transcription regardless of whether it pre-existed on disk.
+    This matters because a prefetch step downloads the *next* video's audio
+    ahead of time, so by the time this runs the file is normally already
+    present — keying cleanup on pre-existence (the old behavior) would leak
+    every prefetched file and grow disk usage without bound. The
+    transcript-cache short-circuit below never touches the filesystem, so a
+    cached run leaves any audio untouched.
+    """
     existing = load_transcript(video_id)
     if existing is not None:
         return existing
 
-    audio_path = AUDIO_DIR / f"{video_id}.opus"
-    audio_existed = audio_path.exists()
     audio_path = download_audio(video_id, url)
-    segments = transcribe_audio(audio_path, model=model)
-    save_transcript(video_id, segments)
-
-    # Delete temporary audio file if it was downloaded (not cached)
-    if not audio_existed:
-        try:
-            audio_path.unlink(missing_ok=True)
-        except Exception:
-            pass  # Ignore deletion errors
+    try:
+        segments = transcribe_audio(audio_path, model=model)
+        save_transcript(video_id, segments)
+    finally:
+        # Best-effort: remove the audio whether or not it pre-existed, since
+        # prefetch makes "already on disk" the normal case (see docstring).
+        if cleanup_audio:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except OSError:
+                pass  # Ignore deletion errors
 
     return segments

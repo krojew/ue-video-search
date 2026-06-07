@@ -13,6 +13,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     FilterSelector,
+    HasIdCondition,
     MatchAny,
     MatchValue,
     PointStruct,
@@ -122,28 +123,11 @@ def upsert_chunks(
     client = client or get_client()
     ensure_collection(client)
 
-    # Delete any existing points for THIS video before inserting, so
-    # re-ingesting is idempotent/replacing. Point ids are derived from the
-    # chunk start times, so if the chunk windowing changes the new points
-    # get new ids and the old ones would otherwise linger as stale
-    # duplicates and pollute search. The filter is scoped to this single
-    # video_id only.
-    client.delete(
-        collection_name=COLLECTION_NAME,
-        points_selector=FilterSelector(
-            filter=Filter(
-                must=[
-                    FieldCondition(
-                        key="video_id", match=MatchValue(value=video_id)
-                    )
-                ]
-            )
-        ),
-    )
-
     points = []
+    new_ids: list[str] = []
     for chunk, vector in zip(chunks, embeddings):
         point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"{video_id}:{chunk['start']}"))
+        new_ids.append(point_id)
         points.append(
             PointStruct(
                 id=point_id,
@@ -159,13 +143,29 @@ def upsert_chunks(
             )
         )
 
-    # Upsert in batches of 100
+    # Upsert the new points FIRST (in batches), then delete only this video's
+    # stale points — those whose id is not among the ones we just wrote.
+    # Ordering matters: if we deleted first and the upsert then failed
+    # transiently, the video would be left with ZERO points (unsearchable).
+    # Upserting first means a mid-operation failure leaves the previous points
+    # intact, and re-ingest is still idempotent because identical windowing
+    # reproduces the same deterministic ids (overwrite-by-id). The trailing
+    # delete drops orphans left behind when the chunk windowing changes.
     batch_size = 100
     for i in range(0, len(points), batch_size):
         client.upsert(
             collection_name=COLLECTION_NAME,
             points=points[i : i + batch_size],
         )
+
+    must: list[Any] = [FieldCondition(key="video_id", match=MatchValue(value=video_id))]
+    must_not: list[Any] = []
+    if new_ids:
+        must_not.append(HasIdCondition(has_id=new_ids))
+    client.delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=FilterSelector(filter=Filter(must=must, must_not=must_not)),
+    )
 
     return len(points)
 

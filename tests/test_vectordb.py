@@ -212,3 +212,50 @@ def test_reindex_does_not_touch_other_videos(live_collection):
     )
     assert _count_for_video(client, name, "vid_a") == 1
     assert _count_for_video(client, name, "vid_b") == 1
+
+
+# ── Hermetic: _existing_vector_size handles named-vectors and None ──────────
+
+
+class _StubVectors:
+    """Stand-in for the .config.params.vectors attribute shape."""
+    def __init__(self, vectors):
+        self._v = vectors
+
+    @property
+    def config(self):
+        return self
+
+    @property
+    def params(self):
+        return self
+
+    @property
+    def vectors(self):
+        return self._v
+
+
+class _StubVectorClient:
+    def __init__(self, vectors):
+        self._vectors = vectors
+
+    def get_collection(self, name):
+        return _StubVectors(self._vectors)
+
+
+def test_existing_vector_size_unnamed():
+    client = _StubVectorClient(VectorParams(size=1024, distance=Distance.COSINE))
+    assert vectordb._existing_vector_size(client, "c") == 1024
+
+
+def test_existing_vector_size_named_single():
+    client = _StubVectorClient({"text": VectorParams(size=768, distance=Distance.COSINE)})
+    assert vectordb._existing_vector_size(client, "c") == 768
+
+
+def test_existing_vector_size_named_conflicting_returns_none():
+    client = _StubVectorClient({
+        "a": VectorParams(size=768, distance=Distance.COSINE),
+        "b": VectorParams(size=1024, distance=Distance.COSINE),
+    })
+    assert vectordb._existing_vector_size(client, "c") is None

@@ -73,7 +73,8 @@ def get_status() -> dict[str, Any]:
 
 
 def is_running() -> bool:
-    return _running
+    with _lock:
+        return _running
 
 
 def subscribe() -> asyncio.Queue:
@@ -90,16 +91,41 @@ def unsubscribe(q: asyncio.Queue) -> None:
             _event_queues.remove(q)
 
 
+def _emit_locked(data: dict[str, Any]) -> None:
+    """Dispatch a prebuilt status snapshot to all subscriber queues.
+
+    The caller MUST already hold ``_lock`` (so the queue list and the snapshot
+    are consistent and we do not re-enter the non-reentrant lock).
+    """
+    for q in _event_queues:
+        try:
+            if _event_loop and not _event_loop.is_closed():
+                _event_loop.call_soon_threadsafe(_push_latest, q, data)
+        except Exception:
+            pass
+
+
 def _emit(status: IngestStatus) -> None:
-    """Push current status to all subscriber queues."""
+    """Snapshot the status under ``_lock`` and push it to subscribers."""
     with _lock:
-        data = status.to_dict()
-        for q in _event_queues:
-            try:
-                if _event_loop and not _event_loop.is_closed():
-                    _event_loop.call_soon_threadsafe(_push_latest, q, data)
-            except Exception:
-                pass
+        _emit_locked(status.to_dict())
+
+
+def _update_status(*, inc: dict[str, int] | None = None, **fields: Any) -> None:
+    """Atomically update ``_status`` fields and emit the resulting snapshot.
+
+    Both the mutation and the snapshot happen under ``_lock`` so concurrent
+    readers (``get_status``) can never observe a torn/inconsistent state
+    (BUG4). ``fields`` sets absolute values; ``inc`` applies integer deltas
+    (read-modify-write) to counter fields under the same lock.
+    """
+    with _lock:
+        for key, value in fields.items():
+            setattr(_status, key, value)
+        if inc:
+            for key, delta in inc.items():
+                setattr(_status, key, getattr(_status, key) + delta)
+        _emit_locked(_status.to_dict())
 
 
 def _push_latest(q: asyncio.Queue, data: dict[str, Any]) -> None:
@@ -121,11 +147,19 @@ def _submit_prefetch(
     """Queue an audio download for `video` if it is not already cached.
 
     Returns None when the transcript already exists, since process_video
-    will short-circuit and the audio would never be read.
+    will short-circuit and the audio would never be read. Also returns None
+    for a malformed entry (missing video_id/url) so a bad dict cannot abort
+    the prefetch of an otherwise healthy run — the malformed video is handled
+    (and counted) in the main loop's per-video error handling.
     """
-    if load_transcript(video["video_id"]) is not None:
+    try:
+        video_id = video["video_id"]
+        url = video["url"]
+    except (KeyError, TypeError):
         return None
-    return pool.submit(download_audio, video["video_id"], video["url"])
+    if load_transcript(video_id) is not None:
+        return None
+    return pool.submit(download_audio, video_id, url)
 
 
 def _run_ingest(
@@ -136,15 +170,23 @@ def _run_ingest(
     skip_archvis: bool = True,
     include_streams: bool = True,
 ) -> None:
-    """Blocking ingest function meant to run in a thread."""
+    """Blocking ingest function meant to run in a thread.
+
+    `_running` is set to True by `start_ingest` under `_lock` *before* the
+    thread is launched (see BUG3). This function only clears it in `finally`.
+    """
     global _running, _status
     model: WhisperModel | None = None
-    _running = True
-    _status = IngestStatus(phase=IngestPhase.FETCHING, message="Fetching video list from YouTube...")
-    _emit(_status)
+    with _lock:
+        _status = IngestStatus(
+            phase=IngestPhase.FETCHING,
+            message="Fetching video list from YouTube...",
+        )
+        _emit_locked(_status.to_dict())
 
     try:
         # ── Fetch ──
+        skip_indexed = not reindex
         if incremental:
             cached = load_video_list()
             fresh = fetch_video_list(
@@ -155,9 +197,17 @@ def _run_ingest(
             )
             merged, new_only = merge_video_lists(cached, fresh)
             save_video_list(merged)
-            videos = new_only
-            _status.new_videos_found = len(new_only)
-            _status.message = f"Found {len(new_only)} new video(s) ({len(merged)} total)"
+            # Candidate pool: when skip-indexed is on, consider the *whole*
+            # merged list so the index diff below also picks up previously
+            # cached videos that failed to ingest (absent from Qdrant). Cache
+            # membership alone must NOT mark a video as done — Qdrant is the
+            # source of truth. With reindex (skip_indexed off) there is no
+            # index diff, so fall back to processing only the brand-new ones.
+            videos = merged if skip_indexed else new_only
+            _update_status(
+                new_videos_found=len(new_only),
+                message=f"Found {len(new_only)} new video(s) ({len(merged)} total)",
+            )
         else:
             videos = fetch_video_list(
                 skip_uefn=skip_uefn,
@@ -166,47 +216,49 @@ def _run_ingest(
                 include_streams=include_streams,
             )
             save_video_list(videos)
-            _status.new_videos_found = len(videos)
-            _status.message = f"Found {len(videos)} videos matching criteria"
-
-        _emit(_status)
+            _update_status(
+                new_videos_found=len(videos),
+                message=f"Found {len(videos)} videos matching criteria",
+            )
 
         if not videos:
-            _status.phase = IngestPhase.DONE
-            _status.message = "No new videos to process."
-            _emit(_status)
+            _update_status(
+                phase=IngestPhase.DONE,
+                message="No new videos to process.",
+            )
             return
 
         # ── Filter already indexed ──
         client = get_client()
         ensure_collection(client)
 
-        skip_indexed = not reindex
         if skip_indexed:
             indexed_ids = list_indexed_video_ids(client)
             to_process = [v for v in videos if v["video_id"] not in indexed_ids]
-            _status.skipped = len(videos) - len(to_process)
+            skipped = len(videos) - len(to_process)
         else:
             to_process = videos
+            skipped = 0
 
-        _status.total = len(to_process)
+        _update_status(skipped=skipped, total=len(to_process))
 
         if not to_process:
-            _status.phase = IngestPhase.DONE
-            _status.message = f"All {len(videos)} videos already indexed. Nothing to do."
-            _emit(_status)
+            _update_status(
+                phase=IngestPhase.DONE,
+                message=f"All {len(videos)} videos already indexed. Nothing to do.",
+            )
             return
 
         # ── Load Whisper ──
-        _status.phase = IngestPhase.LOADING_MODEL
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        _status.message = f"Loading Whisper model ({WHISPER_MODEL}) on {device}..."
-        _emit(_status)
+        _update_status(
+            phase=IngestPhase.LOADING_MODEL,
+            message=f"Loading Whisper model ({WHISPER_MODEL}) on {device}...",
+        )
         model = load_whisper_model()
 
         # ── Process ──
-        _status.phase = IngestPhase.PROCESSING
-        _emit(_status)
+        _update_status(phase=IngestPhase.PROCESSING)
 
         with ThreadPoolExecutor(max_workers=1) as downloader:
             # Prefetch the first video's audio so the worker thread starts
@@ -216,16 +268,10 @@ def _run_ingest(
             pending: Future[Any] | None = _submit_prefetch(downloader, to_process[0])
 
             for i, video in enumerate(to_process):
-                vid = video["video_id"]
-                title = video["title"]
-                url = video["url"]
-
-                _status.current_video = title
-                _status.message = f"Processing: {title[:80]}"
-                _emit(_status)
-
                 # Snapshot the in-flight future for *this* video before
-                # swapping `pending` to the next one.
+                # swapping `pending` to the next one. _submit_prefetch
+                # tolerates malformed entries (returns None), so a bad NEXT
+                # video cannot abort this loop.
                 current_pending = pending
                 pending = (
                     _submit_prefetch(downloader, to_process[i + 1])
@@ -240,48 +286,64 @@ def _run_ingest(
                         pass  # process_video will re-raise from its own download attempt
 
                 try:
+                    # Key access is inside the try so a malformed entry is
+                    # counted as failed and skipped instead of aborting the run.
+                    vid = video["video_id"]
+                    title = video["title"]
+                    url = video["url"]
+
+                    _update_status(
+                        current_video=title,
+                        message=f"Processing: {title[:80]}",
+                    )
+
                     segments = process_video(vid, url, model=model)
                     if not segments:
-                        _status.failed += 1
-                        _status.completed += 1
-                        _emit(_status)
+                        _update_status(inc={"failed": 1, "completed": 1})
                         continue
 
                     texts = [build_chunk_embed_text(title, seg["text"]) for seg in segments]
                     embeddings = embed_texts(texts)
                     count = upsert_chunks(vid, title, url, segments, embeddings, client)
 
-                    _status.completed += 1
-                    _status.message = f"Indexed: {title[:80]} ({count} chunks)"
-                    _emit(_status)
+                    _update_status(
+                        inc={"completed": 1},
+                        message=f"Indexed: {title[:80]} ({count} chunks)",
+                    )
 
                 except Exception as e:
-                    _status.failed += 1
-                    _status.completed += 1
-                    _status.message = f"Failed: {title[:60]} — {e}"
-                    _emit(_status)
+                    _update_status(
+                        inc={"failed": 1, "completed": 1},
+                        message=f"Failed video — {e}",
+                    )
 
-        _status.phase = IngestPhase.DONE
-        _status.current_video = ""
-        _status.message = (
-            f"Ingest complete. "
-            f"{_status.completed - _status.failed} indexed, "
-            f"{_status.failed} failed, "
-            f"{_status.skipped} skipped."
+        # Single writer at this point (the loop is done), so reading a locked
+        # snapshot for the summary cannot race with another mutation.
+        snap = get_status()
+        _update_status(
+            phase=IngestPhase.DONE,
+            current_video="",
+            message=(
+                f"Ingest complete. "
+                f"{snap['completed'] - snap['failed']} indexed, "
+                f"{snap['failed']} failed, "
+                f"{snap['skipped']} skipped."
+            ),
         )
-        _emit(_status)
 
     except Exception as e:
-        _status.phase = IngestPhase.ERROR
-        _status.message = f"Ingest error: {e}\n{traceback.format_exc()}"
-        _emit(_status)
+        _update_status(
+            phase=IngestPhase.ERROR,
+            message=f"Ingest error: {e}\n{traceback.format_exc()}",
+        )
     finally:
         if model is not None:
             del model
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        _running = False
+        with _lock:
+            _running = False
 
 
 def start_ingest(
@@ -294,14 +356,24 @@ def start_ingest(
     include_streams: bool = True,
 ) -> bool:
     """Start the ingest pipeline in a background thread. Returns False if already running."""
-    global _event_loop
-    if _running:
-        return False
+    global _event_loop, _running
+    # Atomic check-and-set under _lock: two near-simultaneous callers must not
+    # both observe _running == False and start two ingest threads (BUG3).
+    with _lock:
+        if _running:
+            return False
+        _running = True
     _event_loop = loop
     t = threading.Thread(
         target=_run_ingest,
         args=(incremental, reindex, skip_uefn, skip_automotive, skip_archvis, include_streams),
         daemon=True,
     )
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        # Roll back the reservation if the thread never actually launched.
+        with _lock:
+            _running = False
+        raise
     return True

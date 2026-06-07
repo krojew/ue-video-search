@@ -80,3 +80,24 @@ def test_process_video_no_cleanup_when_disabled(dirs, monkeypatch):
     transcriber.process_video("vid3", "http://x", cleanup_audio=False)
 
     assert opus.exists()
+
+
+# ── BUG 2: empty transcripts must not be cached ───────────────────────────
+
+
+def test_empty_transcript_not_cached_and_retried(dirs, monkeypatch):
+    """[] from transcribe_audio must not be persisted, so later runs retry."""
+    audio_dir, transcript_dir = dirs
+    opus = audio_dir / "vid_empty.opus"
+    opus.write_bytes(b"fake audio")
+
+    monkeypatch.setattr(transcriber, "download_audio", lambda vid, url: opus)
+    monkeypatch.setattr(transcriber, "transcribe_audio", lambda path, model=None: [])
+
+    result = transcriber.process_video("vid_empty", "http://x")
+
+    assert result == []
+    # No transcript file was written.
+    assert not (transcript_dir / "vid_empty.json").exists()
+    # A subsequent run sees no cache and would process again.
+    assert transcriber.load_transcript("vid_empty") is None

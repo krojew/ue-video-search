@@ -195,7 +195,14 @@ def process_video(
     audio_path = download_audio(video_id, url)
     try:
         segments = transcribe_audio(audio_path, model=model)
-        save_transcript(video_id, segments)
+        # Do NOT persist an empty transcript. transcribe_audio returns [] both
+        # for genuinely-silent videos and for upstream failures; caching []
+        # would make load_transcript hand back [] forever (it is `not None`),
+        # permanently blocking re-ingest of a recoverable failure. Skipping the
+        # save means truly-silent videos are retried every run — an acceptable
+        # cost versus losing recoverable ones.
+        if segments:
+            save_transcript(video_id, segments)
     finally:
         # Best-effort: remove the audio whether or not it pre-existed, since
         # prefetch makes "already on disk" the normal case (see docstring).

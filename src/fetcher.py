@@ -406,6 +406,7 @@ def save_video_list(videos: list[dict[str, Any]], path: Path | None = None) -> P
 def save_fetch_result(
     fresh: list[dict[str, Any]],
     path: Path | None = None,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     """Persist a freshly-fetched video list, guarding against bad fetches.
 
@@ -417,12 +418,18 @@ def save_fetch_result(
     the fresh result is empty or less than half its size; in that case the
     existing cache is kept and returned unchanged.
 
+    Pass ``force=True`` to bypass the shrink guard — for a *deliberate* large
+    shrink (e.g. tightening filters or lowering MAX_AGE_YEARS) where the
+    smaller list is intended and should replace the cache so ``purge`` can act
+    on it.
+
     Returns the list that is now authoritative on disk (either ``fresh`` after
     a successful save, or the retained ``cached`` list).
     """
-    cached = load_video_list(path)
-    if cached and (not fresh or len(fresh) < len(cached) * 0.5):
-        return cached
+    if not force:
+        cached = load_video_list(path)
+        if cached and (not fresh or len(fresh) < len(cached) * 0.5):
+            return cached
     save_video_list(fresh, path)
     return fresh
 

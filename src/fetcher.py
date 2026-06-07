@@ -295,15 +295,22 @@ def fetch_video_list(
         if duration_secs is None or duration_secs < MIN_DURATION_SECONDS:
             continue
 
-        # Publish date (relative)
+        # Publish date. Prefer the precise `upload_date` (YYYYMMDD) when the
+        # yt-dlp path provides it, since the relative text ("2 days ago") loses
+        # precision and can flip include/exclude decisions near the cutoff.
+        # The scrapetube path only has relative text, so fall back to that.
         pub_text = v.get("publishedTimeText", {}).get("simpleText", "")
-        pub_date = _parse_relative_time(pub_text) if pub_text else None
-        if pub_date is None and v.get("upload_date"):
+        pub_date = None
+        if v.get("upload_date"):
             try:
-                pub_date = datetime.strptime(v["upload_date"], "%Y%m%d").replace(tzinfo=timezone.utc)
+                pub_date = datetime.strptime(
+                    v["upload_date"], "%Y%m%d"
+                ).replace(tzinfo=timezone.utc)
                 pub_text = pub_text or _format_relative_time(pub_date)
-            except ValueError:
+            except (ValueError, TypeError):
                 pub_date = None
+        if pub_date is None and pub_text:
+            pub_date = _parse_relative_time(pub_text)
 
         if pub_date and pub_date < cutoff:
             continue

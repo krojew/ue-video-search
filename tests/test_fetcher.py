@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.fetcher import _parse_relative_time
+from src import fetcher
+from src.fetcher import _parse_relative_time, fetch_video_list
 
 
 # ── BUG 1: _parse_relative_time drops fresh/single-unit videos ──────────────
@@ -63,3 +64,78 @@ def test_parse_relative_time_cutoff_ordering():
     assert old is not None and recent is not None
     assert old < cutoff
     assert recent > cutoff
+
+
+# ── BUG 2: cutoff prefers precise upload_date over relative text ────────────
+
+
+def _fake_yt_dlp_factory(entries):
+    def _fake(channel_url, include_streams=True):
+        return entries
+
+    return _fake
+
+
+def test_fetch_video_list_prefers_precise_upload_date(monkeypatch):
+    """When upload_date is present it must win over the relative text.
+
+    The relative text claims "2 years ago" (well inside a 3-year cutoff) but
+    upload_date pins the video to 20180101 (outside the cutoff). The precise
+    date must win, so the video is excluded.
+    """
+    raw = [
+        {
+            "videoId": "OLD123",
+            "title": {"runs": [{"text": "Ancient Tutorial"}]},
+            "lengthText": {"simpleText": "30:00"},
+            "publishedTimeText": {"simpleText": "2 years ago"},
+            "upload_date": "20180101",
+        },
+    ]
+    monkeypatch.setattr(
+        fetcher, "_fetch_channel_videos_with_yt_dlp", _fake_yt_dlp_factory(raw)
+    )
+    results = fetch_video_list(include_streams=False)
+    assert results == [], "precise old upload_date should exclude the video"
+
+
+def test_fetch_video_list_upload_date_drives_published_date(monkeypatch):
+    """published_date must reflect upload_date, not the re-parsed relative text."""
+    recent = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y%m%d")
+    raw = [
+        {
+            "videoId": "NEW456",
+            "title": {"runs": [{"text": "Recent Tutorial"}]},
+            "lengthText": {"simpleText": "30:00"},
+            # Deliberately mismatched relative text to prove precedence.
+            "publishedTimeText": {"simpleText": "2 years ago"},
+            "upload_date": recent,
+        },
+    ]
+    monkeypatch.setattr(
+        fetcher, "_fetch_channel_videos_with_yt_dlp", _fake_yt_dlp_factory(raw)
+    )
+    results = fetch_video_list(include_streams=False)
+    assert len(results) == 1
+    pub = datetime.fromisoformat(results[0]["published_date"])
+    expected = datetime.strptime(recent, "%Y%m%d").replace(tzinfo=timezone.utc)
+    assert pub == expected
+
+
+def test_fetch_video_list_scrapetube_relative_text_still_works(monkeypatch):
+    """Entries without upload_date (scrapetube path) fall back to relative text."""
+    raw = [
+        {
+            "videoId": "REL789",
+            "title": {"runs": [{"text": "Stream Replay"}]},
+            "lengthText": {"simpleText": "45:00"},
+            "publishedTimeText": {"simpleText": "2 days ago"},
+            # no upload_date key at all
+        },
+    ]
+    monkeypatch.setattr(
+        fetcher, "_fetch_channel_videos_with_yt_dlp", _fake_yt_dlp_factory(raw)
+    )
+    results = fetch_video_list(include_streams=False)
+    assert len(results) == 1
+    assert results[0]["video_id"] == "REL789"

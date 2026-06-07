@@ -130,6 +130,10 @@ def test_fetch_video_list_upload_date_drives_published_date(monkeypatch):
 
 def test_fetch_video_list_scrapetube_relative_text_still_works(monkeypatch):
     """Entries without upload_date (scrapetube path) fall back to relative text."""
+    # published_text must be regenerated from upload_date too, not left as the
+    # mismatched "2 years ago" — the two fields must not diverge.
+    assert "year" not in results[0]["published_text"], results[0]["published_text"]
+    assert results[0]["published_text"] == fetcher._format_relative_time(expected)
     raw = [
         {
             "videoId": "REL789",

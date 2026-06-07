@@ -312,7 +312,10 @@ def fetch_video_list(
                 pub_date = datetime.strptime(
                     v["upload_date"], "%Y%m%d"
                 ).replace(tzinfo=timezone.utc)
-                pub_text = pub_text or _format_relative_time(pub_date)
+                # upload_date is authoritative here, so derive the displayed
+                # relative text from it too — otherwise a stale/mismatched
+                # publishedTimeText could disagree with published_date.
+                pub_text = _format_relative_time(pub_date)
             except (ValueError, TypeError):
                 pub_date = None
         if pub_date is None and pub_text:

@@ -45,8 +45,35 @@ def close_client() -> None:
 atexit.register(close_client)
 
 
+def _existing_vector_size(client: QdrantClient, name: str) -> int | None:
+    """Return the configured vector size of an existing collection.
+
+    Handles both the unnamed/default vector config (a VectorParams with a
+    `.size`) and the named-vectors form (a dict of name -> VectorParams).
+    Returns None if the size cannot be determined.
+    """
+    params = client.get_collection(name).config.params.vectors
+    size = getattr(params, "size", None)
+    if size is not None:
+        return size
+    if isinstance(params, dict):
+        sizes = {getattr(vp, "size", None) for vp in params.values()}
+        sizes.discard(None)
+        if len(sizes) == 1:
+            return next(iter(sizes))
+    return None
+
+
 def ensure_collection(client: QdrantClient | None = None) -> None:
-    """Create the collection if it doesn't exist."""
+    """Create the collection if it doesn't exist.
+
+    If the collection already exists, validate that its vector size matches
+    EMBEDDING_DIM. A mismatch means the embedding model / EMBEDDING_DIM
+    config drifted away from what the collection was created with; later
+    upserts and searches would then fail cryptically (or silently degrade),
+    so we raise a clear RuntimeError instructing the operator to recreate
+    the collection.
+    """
     client = client or get_client()
     collections = [c.name for c in client.get_collections().collections]
     if COLLECTION_NAME not in collections:
@@ -56,6 +83,16 @@ def ensure_collection(client: QdrantClient | None = None) -> None:
                 size=EMBEDDING_DIM,
                 distance=Distance.COSINE,
             ),
+        )
+        return
+
+    existing_size = _existing_vector_size(client, COLLECTION_NAME)
+    if existing_size is not None and existing_size != EMBEDDING_DIM:
+        raise RuntimeError(
+            f"Collection {COLLECTION_NAME!r} has vector size {existing_size}, "
+            f"but EMBEDDING_DIM is {EMBEDDING_DIM}. The embedding model or "
+            "EMBEDDING_DIM config has changed; the collection must be "
+            "recreated (drop and re-index) to match the new dimension."
         )
 
 
@@ -68,8 +105,34 @@ def upsert_chunks(
     client: QdrantClient | None = None,
 ) -> int:
     """Insert chunk embeddings with metadata into Qdrant. Returns count inserted."""
+    if len(chunks) != len(embeddings):
+        raise ValueError(
+            f"chunks/embeddings length mismatch for video {video_id!r}: "
+            f"{len(chunks)} chunks vs {len(embeddings)} embeddings. "
+            "Refusing to upsert misaligned data (would silently drop chunks)."
+        )
+
     client = client or get_client()
     ensure_collection(client)
+
+    # Delete any existing points for THIS video before inserting, so
+    # re-ingesting is idempotent/replacing. Point ids are derived from the
+    # chunk start times, so if the chunk windowing changes the new points
+    # get new ids and the old ones would otherwise linger as stale
+    # duplicates and pollute search. The filter is scoped to this single
+    # video_id only.
+    client.delete(
+        collection_name=COLLECTION_NAME,
+        points_selector=FilterSelector(
+            filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="video_id", match=MatchValue(value=video_id)
+                    )
+                ]
+            )
+        ),
+    )
 
     points = []
     for chunk, vector in zip(chunks, embeddings):

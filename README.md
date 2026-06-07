@@ -220,7 +220,7 @@ YouTube Channel
 
 ### Data Flow
 
-1. **Fetch**: Use scrapetube to get video metadata from YouTube channel (yt-dlp is the fallback when scrapetube is blocked)
+1. **Fetch**: Use yt-dlp to get video metadata from the YouTube channel, including past livestreams (scrapetube is the faster fallback when yt-dlp yields nothing)
 2. **Filter**: Apply content filters (UEFN/Fortnite, automotive, archvis) using word-boundary regex
 3. **Download**: yt-dlp extracts the original opus audio stream (no resample); the next video is prefetched in the background while the current one transcribes
 4. **Transcribe**: faster-whisper converts audio to text with timestamps, pinned to English with a UE-jargon initial prompt
@@ -273,6 +273,24 @@ docker compose up --build
 - Check internet connectivity
 - Verify YouTube channel URL is accessible
 - Adjust `MAX_AGE_YEARS` if needed
+
+**Recently uploaded videos (especially past livestreams) are missing**
+- This was a bug in the fetch path, now fixed. The channel listing originally
+  used [scrapetube](https://pypi.org/project/scrapetube/) as the primary source
+  and only fell back to yt-dlp when scrapetube returned *nothing at all*.
+- When YouTube changes its internal page JSON, scrapetube silently returns an
+  empty or stale/partial list instead of raising an error (no newer release
+  fixes this — 2.6.0 is the latest). A non-empty-but-stale result satisfied the
+  `if not raw_videos:` guard, so the reliable yt-dlp fallback never ran and the
+  freshest videos — particularly past livestreams enumerated from the `/streams`
+  tab — were silently dropped.
+- **Fix:** `fetch_video_list()` in `src/fetcher.py` now uses **yt-dlp as the
+  primary source** and falls back to scrapetube only if yt-dlp yields nothing.
+  yt-dlp enumerates the full channel (including past livestreams) and tracks
+  YouTube's format changes far more closely.
+- If a known video is still missing, confirm it passes the filters: published
+  within `MAX_AGE_YEARS`, duration ≥ `MIN_DURATION_SECONDS`, and the title does
+  not match the UEFN/Fortnite, automotive, or archvis exclusion patterns.
 
 ### Logs and Debugging
 

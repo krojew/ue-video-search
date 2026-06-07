@@ -1,4 +1,4 @@
-"""Fetch video metadata from a YouTube channel using scrapetube."""
+"""Fetch video metadata from a YouTube channel using yt-dlp (scrapetube fallback)."""
 
 from __future__ import annotations
 
@@ -222,29 +222,31 @@ def fetch_video_list(
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_YEARS * 365)
 
-    # scrapetube yields raw video renderer dicts from the channel page.
-    # Optionally fetch from the "Live" tab to include past streams.
-    content_types = ["videos"]
-    if include_streams:
-        content_types.append("streams")
-
-    raw_videos: list[dict[str, Any]] = []
-    for content_type in content_types:
-        try:
-            raw_videos.extend(
-                scrapetube.get_channel(
-                    channel_url=CHANNEL_URL,
-                    sort_by="newest",
-                    content_type=content_type,
-                )
-            )
-        except Exception:
-            pass
+    # yt-dlp is the primary source: it reliably enumerates the full channel
+    # (including past livestreams from the /streams tab) and tracks YouTube's
+    # page-format changes closely. scrapetube is faster but periodically
+    # returns a silent empty/partial result when YouTube alters its internal
+    # JSON layout, which would otherwise drop the freshest videos. We only
+    # fall back to scrapetube if yt-dlp yields nothing.
+    raw_videos: list[dict[str, Any]] = _fetch_channel_videos_with_yt_dlp(
+        CHANNEL_URL, include_streams=include_streams
+    )
 
     if not raw_videos:
-        raw_videos = _fetch_channel_videos_with_yt_dlp(
-            CHANNEL_URL, include_streams=include_streams
-        )
+        content_types = ["videos"]
+        if include_streams:
+            content_types.append("streams")
+        for content_type in content_types:
+            try:
+                raw_videos.extend(
+                    scrapetube.get_channel(
+                        channel_url=CHANNEL_URL,
+                        sort_by="newest",
+                        content_type=content_type,
+                    )
+                )
+            except Exception:
+                pass
 
     results: list[dict[str, Any]] = []
     seen_ids: set[str] = set()

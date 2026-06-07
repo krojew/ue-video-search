@@ -63,8 +63,25 @@ def test_title_boost_hyphen_space_insensitive(monkeypatch):
 
     results = search.search_videos("real time rendering", top_k=10)
     assert len(results) == 1
-    # 'real' and 'time' (from the split of 'real-time') both match -> 2 boosts.
+    # 'real' and 'time' are two distinct query words -> 2 boosts.
     assert results[0]["score"] == 0.3 + 2 * search._TITLE_BOOST_PER_KEYWORD
+
+
+def test_hyphenated_query_keyword_counts_once(monkeypatch):
+    """A single hyphenated query concept must boost exactly once, not 3x.
+
+    Regression guard: expanding BOTH sides made 'real-time' match the compound
+    AND both segments (boost x3). Only the title is expanded now, so a
+    hyphenated query keyword intersects as a single concept.
+    """
+    raw = [_raw_result("vh", "Real-Time Global Illumination", score=0.3)]
+    monkeypatch.setattr(search, "embed_query", lambda q: [0.0])
+    monkeypatch.setattr(search, "vector_search", lambda emb, top_k=10: list(raw))
+
+    results = search.search_videos("real-time", top_k=10)
+    assert len(results) == 1
+    # exactly one boost unit, NOT 0.3 (3 units) or 0.5 (2 units).
+    assert results[0]["score"] == 0.3 + search._TITLE_BOOST_PER_KEYWORD
 
 
 def test_expand_hyphenated_keeps_compound_and_parts():

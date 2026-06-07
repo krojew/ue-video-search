@@ -111,10 +111,10 @@ def _expand_hyphenated(tokens: set[str]) -> set[str]:
     """Add hyphen-segment forms of compound tokens to the set.
 
     Keeps each original token and also adds its individual segments split on
-    '-', so "real-time" yields {"real-time", "real", "time"}. Applying this to
-    both the query keywords and the title tokens makes hyphenated and
-    space-separated spellings match either way during title-boost matching,
-    without reintroducing substring false positives (matching stays whole-token).
+    '-', so "real-time" yields {"real-time", "real", "time"}. Applied to the
+    TITLE side only (the query keywords stay unexpanded), this lets a
+    space-separated query match a hyphenated title compound while keeping each
+    query concept worth a single boost and never matching on substrings.
     """
     expanded = set(tokens)
     for tok in tokens:
@@ -142,8 +142,12 @@ def _seconds_to_hms(seconds: float) -> str:
 
 
 def _youtube_timestamp_url(video_url: str, start_seconds: float) -> str:
-    """Append a timestamp parameter to a YouTube URL."""
-    t = int(start_seconds)
+    """Append a timestamp parameter to a YouTube URL.
+
+    Rounds to the nearest second so the link target matches the rounded
+    start shown in the human-readable time_range (see _seconds_to_hms).
+    """
+    t = max(0, int(round(start_seconds)))
     sep = "&" if "?" in video_url else "?"
     return f"{video_url}{sep}t={t}s"
 
@@ -182,16 +186,18 @@ def search_videos(query: str, top_k: int = 10) -> list[dict[str, Any]]:
             raise RuntimeError("No video data has been indexed yet. Please run an ingest first.") from e
         raise RuntimeError(f"Search failed: {e}") from e
 
-    query_keywords = _expand_hyphenated(_extract_keywords(query))
+    # Keep query keywords UNEXPANDED so each distinct query concept counts once.
+    query_keywords = _extract_keywords(query)
     for result in raw_results:
         # Match keywords on word boundaries, not substrings: tokenize the title
         # the same way _extract_keywords tokenizes the query, then count how many
         # query keywords appear as whole tokens (set intersection). This avoids
         # false positives like "ai" matching "chain"/"detailing".
         #
-        # Both sides are hyphen-expanded so a hyphenated compound and its
-        # space-separated form match either way: a "real time" query boosts a
-        # "Real-Time ..." title and vice versa.
+        # Only the TITLE is hyphen-expanded (compound -> compound + segments), so
+        # a space-separated query ("real time") still matches a hyphenated title
+        # ("Real-Time ...") while a hyphenated query keyword ("real-time") counts
+        # as exactly one boost — the per-keyword boost semantics are preserved.
         title_tokens = _expand_hyphenated(
             set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", result["video_title"].lower()))
         )

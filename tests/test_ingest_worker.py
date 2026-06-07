@@ -207,6 +207,30 @@ def test_bug4_concurrent_get_status_never_raises(monkeypatch):
     assert final["completed"] == 8
 
 
+def test_bug5_malformed_video_does_not_abort_run(monkeypatch):
+    """A malformed entry is counted failed; the run completes and indexes the good one."""
+    good = _vid("good")
+    malformed = {"not_a_video": True}  # missing video_id/title/url
+    videos = [malformed, good]
+
+    monkeypatch.setattr(w, "load_video_list", lambda: list(videos))
+    monkeypatch.setattr(w, "fetch_video_list", lambda **k: list(videos))
+    monkeypatch.setattr(w, "save_video_list", lambda v: None)
+
+    processed: list[str] = []
+    # reindex=True -> skip_indexed off -> index diff bypassed, so the malformed
+    # entry reaches the per-video loop (the BUG5 code path).
+    _patch_heavy(monkeypatch, indexed_ids=set(), processed=processed)
+
+    w._run_ingest(incremental=False, reindex=True)
+
+    snap = w.get_status()
+    assert snap["phase"] == w.IngestPhase.DONE.value, "run must complete, not error out"
+    assert processed == ["good"], "only the well-formed video should be processed"
+    assert snap["failed"] == 1, "the malformed entry must be counted as failed"
+    assert snap["completed"] == 2, "both entries advance the loop (1 failed + 1 ok)"
+
+
 def test_bug1_incremental_reindex_off_unchanged_when_all_indexed(monkeypatch):
     """When everything cached is already indexed, nothing is processed."""
     cached = [_vid("a"), _vid("b")]

@@ -147,11 +147,19 @@ def _submit_prefetch(
     """Queue an audio download for `video` if it is not already cached.
 
     Returns None when the transcript already exists, since process_video
-    will short-circuit and the audio would never be read.
+    will short-circuit and the audio would never be read. Also returns None
+    for a malformed entry (missing video_id/url) so a bad dict cannot abort
+    the prefetch of an otherwise healthy run — the malformed video is handled
+    (and counted) in the main loop's per-video error handling.
     """
-    if load_transcript(video["video_id"]) is not None:
+    try:
+        video_id = video["video_id"]
+        url = video["url"]
+    except (KeyError, TypeError):
         return None
-    return pool.submit(download_audio, video["video_id"], video["url"])
+    if load_transcript(video_id) is not None:
+        return None
+    return pool.submit(download_audio, video_id, url)
 
 
 def _run_ingest(
@@ -260,17 +268,10 @@ def _run_ingest(
             pending: Future[Any] | None = _submit_prefetch(downloader, to_process[0])
 
             for i, video in enumerate(to_process):
-                vid = video["video_id"]
-                title = video["title"]
-                url = video["url"]
-
-                _update_status(
-                    current_video=title,
-                    message=f"Processing: {title[:80]}",
-                )
-
                 # Snapshot the in-flight future for *this* video before
-                # swapping `pending` to the next one.
+                # swapping `pending` to the next one. _submit_prefetch
+                # tolerates malformed entries (returns None), so a bad NEXT
+                # video cannot abort this loop.
                 current_pending = pending
                 pending = (
                     _submit_prefetch(downloader, to_process[i + 1])
@@ -285,6 +286,17 @@ def _run_ingest(
                         pass  # process_video will re-raise from its own download attempt
 
                 try:
+                    # Key access is inside the try so a malformed entry is
+                    # counted as failed and skipped instead of aborting the run.
+                    vid = video["video_id"]
+                    title = video["title"]
+                    url = video["url"]
+
+                    _update_status(
+                        current_video=title,
+                        message=f"Processing: {title[:80]}",
+                    )
+
                     segments = process_video(vid, url, model=model)
                     if not segments:
                         _update_status(inc={"failed": 1, "completed": 1})
@@ -302,7 +314,7 @@ def _run_ingest(
                 except Exception as e:
                     _update_status(
                         inc={"failed": 1, "completed": 1},
-                        message=f"Failed: {title[:60]} — {e}",
+                        message=f"Failed video — {e}",
                     )
 
         # Single writer at this point (the loop is done), so reading a locked

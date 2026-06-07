@@ -98,11 +98,19 @@ def _submit_prefetch(
     """Queue an audio download for `video` if it is not already cached.
 
     Returns None when the transcript already exists, since process_video
-    will short-circuit and the audio would never be read.
+    will short-circuit and the audio would never be read. Also returns None
+    for a malformed entry (missing video_id/url) so a bad dict cannot abort
+    the prefetch of an otherwise healthy run — the malformed video is handled
+    (and counted) in the main loop's per-video error handling.
     """
-    if load_transcript(video["video_id"]) is not None:
+    try:
+        video_id = video["video_id"]
+        url = video["url"]
+    except (KeyError, TypeError):
         return None
-    return pool.submit(download_audio, video["video_id"], video["url"])
+    if load_transcript(video_id) is not None:
+        return None
+    return pool.submit(download_audio, video_id, url)
 
 
 def _ingest_videos(
@@ -154,15 +162,10 @@ def _ingest_videos(
             pending: Future[Any] | None = _submit_prefetch(downloader, to_process[0])
 
             for i, video in enumerate(to_process):
-                vid = video["video_id"]
-                title = video["title"]
-                url = video["url"]
-
-                progress.update(task, description=f"[cyan]{title[:60]}[/cyan]")
-
                 # Snapshot the in-flight future for *this* video before swapping
                 # `pending` to the next one — otherwise we would wait on the
-                # wrong download.
+                # wrong download. _submit_prefetch tolerates malformed entries
+                # (returns None), so a bad NEXT video cannot abort this loop.
                 current_pending = pending
                 pending = (
                     _submit_prefetch(downloader, to_process[i + 1])
@@ -177,6 +180,15 @@ def _ingest_videos(
                         pass  # process_video will re-raise from its own download attempt
 
                 try:
+                    # Key access is inside the try so a malformed entry is
+                    # counted as a failure and skipped instead of aborting the
+                    # whole run.
+                    vid = video["video_id"]
+                    title = video["title"]
+                    url = video["url"]
+
+                    progress.update(task, description=f"[cyan]{title[:60]}[/cyan]")
+
                     # 1. Download audio + transcribe (audio is already on disk
                     #    if the prefetch landed; download_audio short-circuits)
                     segments = process_video(vid, url, model=model)
@@ -193,7 +205,7 @@ def _ingest_videos(
                     console.print(f"  [green]✓ {title[:60]} — {count} chunks indexed[/green]")
 
                 except Exception as e:
-                    console.print(f"  [red]✗ {title[:60]} — {e}[/red]")
+                    console.print(f"  [red]✗ malformed/failed video — {e}[/red]")
 
                 progress.update(task, advance=1)
     finally:

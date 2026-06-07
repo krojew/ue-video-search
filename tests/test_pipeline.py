@@ -78,6 +78,51 @@ def test_bug2_use_cached_true_unchanged(monkeypatch):
     assert saved == []
 
 
+def test_bug5_malformed_video_does_not_abort_ingest(monkeypatch):
+    """A malformed entry must be skipped, the good one still indexed."""
+    good = _vid("good")
+    malformed = {"not_a_video": True}  # missing video_id/title/url
+    to_process = [malformed, good]
+
+    processed: list[str] = []
+
+    def fake_process_video(vid, url, model=None):
+        processed.append(vid)
+        return [{"text": "hi", "start": 0.0, "end": 1.0}]
+
+    upserts: list[str] = []
+
+    monkeypatch.setattr(p, "get_client", lambda: object())
+    monkeypatch.setattr(p, "ensure_collection", lambda client: None)
+    monkeypatch.setattr(p, "load_whisper_model", lambda: object())
+    monkeypatch.setattr(p, "process_video", fake_process_video)
+    monkeypatch.setattr(p, "build_chunk_embed_text", lambda title, text: text)
+    monkeypatch.setattr(p, "embed_texts", lambda texts: [[0.0] for _ in texts])
+    monkeypatch.setattr(
+        p, "upsert_chunks", lambda vid, *a, **k: upserts.append(vid) or 1
+    )
+    monkeypatch.setattr(p, "load_transcript", lambda video_id: None)
+    monkeypatch.setattr(p, "download_audio", lambda video_id, url: None)
+
+    class _FakeCuda:
+        @staticmethod
+        def is_available():
+            return False
+
+        @staticmethod
+        def empty_cache():
+            return None
+
+    monkeypatch.setattr(p.torch, "cuda", _FakeCuda)
+
+    # skip_indexed=False bypasses the index diff so the malformed entry reaches
+    # the per-video loop (the code path BUG5 hardens). Must not raise.
+    p._ingest_videos(to_process, skip_indexed=False, label="t")
+
+    assert processed == ["good"], "only the well-formed video should be processed"
+    assert upserts == ["good"], "only the good video should be upserted"
+
+
 def test_bug1_run_ingest_new_only_processes_full_merged_list(monkeypatch):
     """Incremental CLI ingest must hand the *merged* list to _ingest_videos.
 

@@ -237,3 +237,65 @@ def test_ingest_stream_live_path_then_terminal(monkeypatch):
     assert phases == ["processing", "processing", "done"]
     assert all(e["event"] == "status" for e in events)
     webapp.ingest_worker.unsubscribe(queue)
+
+
+# ── Bug 1 regression guard: work is actually offloaded off the event loop ──
+
+
+def test_api_search_offloads_to_executor_thread(monkeypatch):
+    """search_videos must run on an executor worker, not the event-loop thread.
+
+    Reverting `await loop.run_in_executor(None, ...)` back to a direct blocking
+    call would make this fail (the callable would run on the main/loop thread).
+    """
+    import threading
+
+    main_thread = threading.main_thread()
+    seen: dict[str, Any] = {}
+
+    def fake_search(q, top_k=10):
+        seen["thread"] = threading.current_thread()
+        return []
+
+    monkeypatch.setattr(webapp, "search_videos", fake_search)
+
+    client = TestClient(webapp.app)
+    resp = client.get("/api/search", params={"q": "x"})
+    assert resp.status_code == 200
+    assert "thread" in seen, "search_videos was never called"
+    assert seen["thread"] is not main_thread, (
+        "search_videos ran on the event-loop/main thread — it was not offloaded "
+        "to run_in_executor, so it would block the loop"
+    )
+
+
+def test_api_stats_offloads_to_executor_thread(monkeypatch):
+    """The blocking Qdrant/file work in api_stats must run off the loop thread."""
+    import threading
+
+    main_thread = threading.main_thread()
+    seen: list[str] = []
+
+    class FakeClient:
+        def get_collection(self, name):
+            seen.append(f"get_collection:{threading.current_thread() is main_thread}")
+
+            class _Info:
+                points_count = 7
+
+            return _Info()
+
+    monkeypatch.setattr(webapp, "get_client", lambda: FakeClient())
+
+    def fake_load_video_list(*a, **k):
+        seen.append(f"load:{threading.current_thread() is main_thread}")
+        return [{"video_id": "a"}]
+
+    monkeypatch.setattr(webapp, "load_video_list", fake_load_video_list)
+
+    client = TestClient(webapp.app)
+    resp = client.get("/api/stats")
+    assert resp.status_code == 200
+    # Both blocking calls must report running off the main thread (False).
+    assert seen, "stats backend was never called"
+    assert all(s.endswith("False") for s in seen), f"stats work ran on loop thread: {seen}"

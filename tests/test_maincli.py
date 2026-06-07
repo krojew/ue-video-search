@@ -24,7 +24,8 @@ def test_search_connection_error_exits_nonzero(monkeypatch):
     assert result.exit_code != 0
     # Friendly message, not a raw traceback.
     assert "Connection Error" in result.output
-    assert "Traceback" not in result.output
+    # The backend exception was converted to a clean exit, not propagated.
+    assert result.exc_info is None or result.exc_info[0] is SystemExit
 
 
 def test_search_runtime_error_exits_nonzero(monkeypatch):
@@ -38,7 +39,7 @@ def test_search_runtime_error_exits_nonzero(monkeypatch):
 
     assert result.exit_code != 0
     assert "Search Error" in result.output
-    assert "Traceback" not in result.output
+    assert result.exc_info is None or result.exc_info[0] is SystemExit
 
 
 def test_search_value_error_exits_nonzero(monkeypatch):
@@ -55,7 +56,7 @@ def test_search_value_error_exits_nonzero(monkeypatch):
     # must NOT have fallen through to the generic 'Unexpected Error' handler.
     assert "bad query" in result.output
     assert "Unexpected Error" not in result.output
-    assert "Traceback" not in result.output
+    assert result.exc_info is None or result.exc_info[0] is SystemExit
 
 
 def test_search_unexpected_error_exits_nonzero(monkeypatch):
@@ -69,7 +70,7 @@ def test_search_unexpected_error_exits_nonzero(monkeypatch):
 
     assert result.exit_code != 0
     assert "Unexpected Error" in result.output
-    assert "Traceback" not in result.output
+    assert result.exc_info is None or result.exc_info[0] is SystemExit
 
 
 # --- BUG 2 happy path: "no results" is NOT an error (exit 0) ----------------
@@ -160,7 +161,9 @@ def test_interactive_survives_backend_error(monkeypatch):
     assert result.exit_code == 0
     assert "Search Error" in result.output
     assert "Goodbye" in result.output
-    assert "Traceback" not in result.output
+    # The loop survived the backend error and exited cleanly (no exception
+    # propagated out of the command).
+    assert result.exception is None
 
 
 def test_interactive_survives_connection_error_via_eof(monkeypatch):
@@ -186,4 +189,6 @@ def test_interactive_survives_connection_error_via_eof(monkeypatch):
     assert result.exit_code == 0
     assert "Connection Error" in result.output
     assert "Goodbye" in result.output
-    assert "Traceback" not in result.output
+    # The loop survived the backend error and exited cleanly (no exception
+    # propagated out of the command).
+    assert result.exception is None

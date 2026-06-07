@@ -135,7 +135,12 @@ def purge() -> None:
 
 @cli.command()
 @click.argument("query")
-@click.option("--top-k", default=10, help="Number of results to return.")
+@click.option(
+    "--top-k",
+    default=10,
+    type=click.IntRange(min=1),
+    help="Number of results to return (must be >= 1).",
+)
 def search(query: str, top_k: int) -> None:
     """Search indexed videos for a topic."""
     from src.search import search_videos
@@ -144,16 +149,16 @@ def search(query: str, top_k: int) -> None:
         results = search_videos(query, top_k=top_k)
     except ValueError as e:
         console.print(f"[red]Error:[/red] {e}")
-        return
+        raise SystemExit(1)
     except ConnectionError as e:
         console.print(f"[red]Connection Error:[/red] {e}")
-        return
+        raise SystemExit(1)
     except RuntimeError as e:
         console.print(f"[red]Search Error:[/red] {e}")
-        return
+        raise SystemExit(1)
     except Exception as e:
         console.print(f"[red]Unexpected Error:[/red] {e}")
-        return
+        raise SystemExit(1)
 
     if not results:
         console.print("[yellow]No results found.[/yellow]")
@@ -214,7 +219,20 @@ def interactive() -> None:
         if not query or query.lower() in ("quit", "exit", "q"):
             break
 
-        results = search_videos(query, top_k=10)
+        try:
+            results = search_videos(query, top_k=10)
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}\n")
+            continue
+        except ConnectionError as e:
+            console.print(f"[red]Connection Error:[/red] {e}\n")
+            continue
+        except RuntimeError as e:
+            console.print(f"[red]Search Error:[/red] {e}\n")
+            continue
+        except Exception as e:
+            console.print(f"[red]Unexpected Error:[/red] {e}\n")
+            continue
 
         if not results:
             console.print("[yellow]No results found.[/yellow]\n")

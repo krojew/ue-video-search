@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -357,16 +359,44 @@ def merge_video_lists(
 
 
 def save_video_list(videos: list[dict[str, Any]], path: Path | None = None) -> Path:
-    """Persist the video list to JSON."""
+    """Persist the video list to JSON atomically.
+
+    Writes to a temp file in the same directory and then ``os.replace()``s it
+    into place, which is atomic on POSIX. This guarantees that a crash mid-write
+    leaves the previous cache intact rather than a truncated/corrupt file.
+    """
     path = path or DATA_DIR / "videos.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(videos, indent=2, default=str))
+    data = json.dumps(videos, indent=2, default=str)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        # Clean up the temp file if anything went wrong before the replace.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
     return path
 
 
 def load_video_list(path: Path | None = None) -> list[dict[str, Any]]:
-    """Load a previously saved video list."""
+    """Load a previously saved video list.
+
+    Tolerates a missing, empty, or corrupt cache file by returning an empty
+    list instead of raising.
+    """
     path = path or DATA_DIR / "videos.json"
     if not path.exists():
         return []
-    return json.loads(path.read_text())
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, ValueError, OSError):
+        return []

@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src import fetcher
-from src.fetcher import _parse_relative_time, fetch_video_list
+from src.fetcher import (
+    _parse_relative_time,
+    fetch_video_list,
+    load_video_list,
+    save_video_list,
+)
 
 
 # ── BUG 1: _parse_relative_time drops fresh/single-unit videos ──────────────
@@ -139,3 +144,44 @@ def test_fetch_video_list_scrapetube_relative_text_still_works(monkeypatch):
     results = fetch_video_list(include_streams=False)
     assert len(results) == 1
     assert results[0]["video_id"] == "REL789"
+
+
+# ── BUG 3: atomic save + tolerant load ──────────────────────────────────────
+
+
+def test_save_load_round_trip(tmp_path):
+    path = tmp_path / "videos.json"
+    videos = [
+        {"video_id": "abc", "title": "One"},
+        {"video_id": "def", "title": "Two"},
+    ]
+    returned = save_video_list(videos, path=path)
+    assert returned == path
+    assert path.exists()
+    loaded = load_video_list(path=path)
+    assert loaded == videos
+
+
+def test_load_corrupt_file_returns_empty(tmp_path):
+    path = tmp_path / "videos.json"
+    path.write_text("{ this is not valid json :::")
+    assert load_video_list(path=path) == []
+
+
+def test_load_empty_file_returns_empty(tmp_path):
+    path = tmp_path / "videos.json"
+    path.write_text("")
+    assert load_video_list(path=path) == []
+
+
+def test_load_missing_file_returns_empty(tmp_path):
+    path = tmp_path / "does_not_exist.json"
+    assert load_video_list(path=path) == []
+
+
+def test_save_leaves_no_temp_files(tmp_path):
+    path = tmp_path / "videos.json"
+    save_video_list([{"video_id": "x"}], path=path)
+    # Only the final file should remain — no leftover *.tmp artifacts.
+    leftovers = [p.name for p in tmp_path.iterdir() if p.name != "videos.json"]
+    assert leftovers == []

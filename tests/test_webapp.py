@@ -242,60 +242,75 @@ def test_ingest_stream_live_path_then_terminal(monkeypatch):
 # ── Bug 1 regression guard: work is actually offloaded off the event loop ──
 
 
-def test_api_search_offloads_to_executor_thread(monkeypatch):
-    """search_videos must run on an executor worker, not the event-loop thread.
+def _spy_run_in_executor(monkeypatch):
+    """Wrap the running loop's run_in_executor and record the callable threads.
 
-    Reverting `await loop.run_in_executor(None, ...)` back to a direct blocking
-    call would make this fail (the callable would run on the main/loop thread).
+    Returns a dict that, after a request, holds:
+      - "offloaded": True if run_in_executor was actually used, and
+      - "loop_thread"/"work_thread": the thread the endpoint coroutine ran on
+        vs the thread the blocking callable ran on (they MUST differ).
+    A reverted direct-blocking call never touches run_in_executor, so
+    "offloaded" stays False and the assertions fail — making this discriminate
+    the fix (unlike comparing against the main thread, which the TestClient
+    portal thread defeats).
     """
+    import asyncio.base_events
     import threading
 
-    main_thread = threading.main_thread()
-    seen: dict[str, Any] = {}
+    info: dict[str, Any] = {"offloaded": False, "work_threads": [], "loop_threads": []}
+    # run_in_executor is defined on BaseEventLoop (the concrete loop's class),
+    # not the abstract base — patch there so the wrapper is actually hit.
+    base = asyncio.base_events.BaseEventLoop
+    orig = base.run_in_executor
 
-    def fake_search(q, top_k=10):
-        seen["thread"] = threading.current_thread()
-        return []
+    def wrapper(self, executor, func, *args):
+        info["offloaded"] = True
+        info["loop_threads"].append(threading.current_thread())
 
-    monkeypatch.setattr(webapp, "search_videos", fake_search)
+        def wrapped():
+            info["work_threads"].append(threading.current_thread())
+            return func(*args)
+
+        return orig(self, executor, wrapped)
+
+    monkeypatch.setattr(base, "run_in_executor", wrapper)
+    return info
+
+
+def test_api_search_offloads_to_executor_thread(monkeypatch):
+    """search_videos must be dispatched via run_in_executor, on a different
+    thread than the endpoint coroutine. Reverting to a direct call fails this."""
+    monkeypatch.setattr(webapp, "search_videos", lambda q, top_k=10: [])
+    info = _spy_run_in_executor(monkeypatch)
 
     client = TestClient(webapp.app)
     resp = client.get("/api/search", params={"q": "x"})
     assert resp.status_code == 200
-    assert "thread" in seen, "search_videos was never called"
-    assert seen["thread"] is not main_thread, (
-        "search_videos ran on the event-loop/main thread — it was not offloaded "
-        "to run_in_executor, so it would block the loop"
+    assert info["offloaded"], "search_videos was not dispatched via run_in_executor"
+    assert info["work_threads"], "executor callable never ran"
+    # The blocking work ran on a thread distinct from the coroutine's loop thread.
+    assert set(info["work_threads"]).isdisjoint(set(info["loop_threads"])), (
+        f"work ran on the loop thread: work={info['work_threads']} loop={info['loop_threads']}"
     )
 
 
 def test_api_stats_offloads_to_executor_thread(monkeypatch):
-    """The blocking Qdrant/file work in api_stats must run off the loop thread."""
-    import threading
-
-    main_thread = threading.main_thread()
-    seen: list[str] = []
-
+    """The blocking Qdrant/file work in api_stats must go through run_in_executor."""
     class FakeClient:
         def get_collection(self, name):
-            seen.append(f"get_collection:{threading.current_thread() is main_thread}")
-
             class _Info:
                 points_count = 7
 
             return _Info()
 
     monkeypatch.setattr(webapp, "get_client", lambda: FakeClient())
-
-    def fake_load_video_list(*a, **k):
-        seen.append(f"load:{threading.current_thread() is main_thread}")
-        return [{"video_id": "a"}]
-
-    monkeypatch.setattr(webapp, "load_video_list", fake_load_video_list)
+    monkeypatch.setattr(webapp, "load_video_list", lambda *a, **k: [{"video_id": "a"}])
+    info = _spy_run_in_executor(monkeypatch)
 
     client = TestClient(webapp.app)
     resp = client.get("/api/stats")
     assert resp.status_code == 200
-    # Both blocking calls must report running off the main thread (False).
-    assert seen, "stats backend was never called"
-    assert all(s.endswith("False") for s in seen), f"stats work ran on loop thread: {seen}"
+    assert info["offloaded"], "api_stats did not offload blocking work to run_in_executor"
+    assert set(info["work_threads"]).isdisjoint(set(info["loop_threads"])), (
+        f"stats work ran on the loop thread: work={info['work_threads']} loop={info['loop_threads']}"
+    )

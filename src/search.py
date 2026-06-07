@@ -107,6 +107,22 @@ def _extract_keywords(text: str) -> set[str]:
     return keywords
 
 
+def _expand_hyphenated(tokens: set[str]) -> set[str]:
+    """Add hyphen-segment forms of compound tokens to the set.
+
+    Keeps each original token and also adds its individual segments split on
+    '-', so "real-time" yields {"real-time", "real", "time"}. Applying this to
+    both the query keywords and the title tokens makes hyphenated and
+    space-separated spellings match either way during title-boost matching,
+    without reintroducing substring false positives (matching stays whole-token).
+    """
+    expanded = set(tokens)
+    for tok in tokens:
+        if "-" in tok:
+            expanded.update(part for part in tok.split("-") if part)
+    return expanded
+
+
 def _seconds_to_hms(seconds: float) -> str:
     """Convert seconds to H:MM:SS format.
 
@@ -166,14 +182,18 @@ def search_videos(query: str, top_k: int = 10) -> list[dict[str, Any]]:
             raise RuntimeError("No video data has been indexed yet. Please run an ingest first.") from e
         raise RuntimeError(f"Search failed: {e}") from e
 
-    query_keywords = _extract_keywords(query)
+    query_keywords = _expand_hyphenated(_extract_keywords(query))
     for result in raw_results:
         # Match keywords on word boundaries, not substrings: tokenize the title
         # the same way _extract_keywords tokenizes the query, then count how many
         # query keywords appear as whole tokens (set intersection). This avoids
         # false positives like "ai" matching "chain"/"detailing".
-        title_tokens = set(
-            re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", result["video_title"].lower())
+        #
+        # Both sides are hyphen-expanded so a hyphenated compound and its
+        # space-separated form match either way: a "real time" query boosts a
+        # "Real-Time ..." title and vice versa.
+        title_tokens = _expand_hyphenated(
+            set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)*", result["video_title"].lower()))
         )
         title_matches = len(query_keywords & title_tokens)
         if title_matches > 0:

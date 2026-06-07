@@ -44,7 +44,8 @@ async def api_search(
     top_k: int = Query(10, ge=1, le=50),
 ) -> dict[str, Any]:
     try:
-        results = search_videos(q, top_k=top_k)
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(None, lambda: search_videos(q, top_k=top_k))
     except ValueError as e:
         return {"error": str(e), "query": q}
     except ConnectionError as e:
@@ -84,14 +85,19 @@ async def api_search(
 
 @app.get("/api/stats")
 async def api_stats() -> dict[str, Any]:
-    try:
+    loop = asyncio.get_running_loop()
+
+    def _fetch_points() -> int:
         client = get_client()
         info = client.get_collection(COLLECTION_NAME)
-        points = info.points_count or 0
+        return info.points_count or 0
+
+    try:
+        points = await loop.run_in_executor(None, _fetch_points)
     except Exception:
         points = 0
 
-    videos = load_video_list()
+    videos = await loop.run_in_executor(None, load_video_list)
     return {
         "indexed_chunks": points,
         "cached_videos": len(videos),

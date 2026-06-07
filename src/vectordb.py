@@ -68,6 +68,13 @@ def upsert_chunks(
     client: QdrantClient | None = None,
 ) -> int:
     """Insert chunk embeddings with metadata into Qdrant. Returns count inserted."""
+    if len(chunks) != len(embeddings):
+        raise ValueError(
+            f"chunks/embeddings length mismatch for video {video_id!r}: "
+            f"{len(chunks)} chunks vs {len(embeddings)} embeddings. "
+            "Refusing to upsert misaligned data (would silently drop chunks)."
+        )
+
     client = client or get_client()
     ensure_collection(client)
 

@@ -76,5 +76,18 @@ def embed_texts(texts: list[str], batch_size: int = 128) -> list[list[float]]:
         ) as resp:
             resp.raise_for_status()
             data = resp.json()
-        all_embeddings.extend(data["embeddings"])
+        batch_embeddings = data["embeddings"]
+        if len(batch_embeddings) != len(batch):
+            raise RuntimeError(
+                f"Ollama returned {len(batch_embeddings)} embeddings for a "
+                f"batch of {len(batch)} inputs (model {EMBEDDING_MODEL!r}). "
+                "Refusing to continue with misaligned embeddings."
+            )
+        all_embeddings.extend(batch_embeddings)
+
+    if len(all_embeddings) != len(texts):
+        raise RuntimeError(
+            f"Embedding count mismatch: produced {len(all_embeddings)} "
+            f"vectors for {len(texts)} input texts."
+        )
     return all_embeddings

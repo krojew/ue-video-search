@@ -41,6 +41,21 @@ def run_fetch(
         skip_archvis=skip_archvis,
         include_streams=include_streams,
     )
+
+    # Guard against a transient fetch that returns nothing or far fewer videos
+    # than we already have on disk. Blindly overwriting would destroy the good
+    # cache, and `purge` would then treat the truncated list as the allow-set
+    # and delete valid indexed videos. Only overwrite when the fetch looks
+    # plausibly complete.
+    cached = load_video_list()
+    if cached and (not videos or len(videos) < len(cached) * 0.5):
+        console.print(
+            f"[yellow]Warning: fresh fetch returned {len(videos)} video(s) but "
+            f"{len(cached)} are cached on disk. Keeping the existing cache "
+            f"instead of overwriting it with a likely-incomplete result.[/yellow]"
+        )
+        return cached
+
     save_video_list(videos)
     console.print(f"[green]Found {len(videos)} videos matching criteria.[/green]")
     return videos

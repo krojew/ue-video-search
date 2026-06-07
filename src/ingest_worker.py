@@ -189,6 +189,13 @@ def _run_ingest(
 
     try:
         # ── Fetch ──
+        # `incremental` and `reindex` are mutually exclusive intents: incremental
+        # means "process what isn't indexed yet", reindex means "re-process
+        # everything". The web endpoint can supply both; treat incremental as
+        # the winner (ignore reindex) so the confusing combination can't
+        # silently skip the videos a caller asked to reindex.
+        if incremental:
+            reindex = False
         skip_indexed = not reindex
         if incremental:
             cached = load_video_list()
@@ -370,12 +377,15 @@ def start_ingest(
             return False
         _running = True
     _event_loop = loop
-    t = threading.Thread(
-        target=_run_ingest,
-        args=(incremental, reindex, skip_uefn, skip_automotive, skip_archvis, include_streams),
-        daemon=True,
-    )
+    # Construct AND start the thread inside the try: if Thread.__init__ raises
+    # (e.g. resource exhaustion) the reservation must still be rolled back,
+    # otherwise _running stays True and every future ingest is wrongly refused.
     try:
+        t = threading.Thread(
+            target=_run_ingest,
+            args=(incremental, reindex, skip_uefn, skip_automotive, skip_archvis, include_streams),
+            daemon=True,
+        )
         t.start()
     except Exception:
         # Roll back the reservation if the thread never actually launched.

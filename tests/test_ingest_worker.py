@@ -119,6 +119,54 @@ def test_bug3_start_ingest_is_not_double_started(monkeypatch):
     assert w.is_running() is True
 
 
+def test_bug3_concurrent_start_ingest_starts_exactly_one(monkeypatch):
+    """Many concurrent callers must still yield exactly one started ingest.
+
+    NOTE: this is a best-effort stress test, not a strict lock discriminator.
+    The check-and-set window in start_ingest is tiny, so an unlocked version
+    may still pass here most of the time; it is kept as a smoke test for the
+    common concurrent path. The atomic reservation under _lock is the real
+    guard, and the constructor/launch rollback tests below pin the related
+    invariants deterministically.
+    """
+    n = 32
+    started: list[object] = []
+    started_lock = threading.Lock()
+    # Capture the REAL Thread before patching — the callers below must use it,
+    # since the patch replaces threading.Thread that start_ingest constructs.
+    RealThread = threading.Thread
+
+    class FakeThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            with started_lock:
+                started.append(self)
+
+    monkeypatch.setattr(w.threading, "Thread", FakeThread)
+    monkeypatch.setattr(w, "_run_ingest", lambda *a, **k: None)
+
+    barrier = threading.Barrier(n)
+    results: list[bool] = []
+    results_lock = threading.Lock()
+
+    def caller():
+        barrier.wait()  # maximise contention on the check-and-set
+        r = w.start_ingest(object(), incremental=True)
+        with results_lock:
+            results.append(r)
+
+    threads = [RealThread(target=caller) for _ in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert results.count(True) == 1, f"exactly one caller must win, got {results.count(True)}"
+    assert len(started) == 1, f"exactly one worker thread may start, got {len(started)}"
+
+
 def test_bug3_thread_start_failure_rolls_back_running(monkeypatch):
     """If the thread fails to launch, _running must not stay stuck True."""
 
@@ -136,6 +184,27 @@ def test_bug3_thread_start_failure_rolls_back_running(monkeypatch):
         w.start_ingest(object(), incremental=True)
 
     assert w.is_running() is False, "_running must be rolled back on launch failure"
+
+
+def test_bug3_thread_construction_failure_rolls_back_running(monkeypatch):
+    """If Thread.__init__ (not start) raises, _running must still roll back.
+
+    Regression guard for the HIGH review finding: the Thread(...) construction
+    must be inside the rollback try, or a constructor failure bricks ingest by
+    leaving _running stuck True.
+    """
+
+    class ExplodingConstructor:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("cannot allocate thread")
+
+    monkeypatch.setattr(w.threading, "Thread", ExplodingConstructor)
+    monkeypatch.setattr(w, "_run_ingest", lambda *a, **k: None)
+
+    with pytest.raises(RuntimeError):
+        w.start_ingest(object(), incremental=True)
+
+    assert w.is_running() is False, "_running must roll back on constructor failure"
 
 
 _EXPECTED_STATUS_KEYS = {

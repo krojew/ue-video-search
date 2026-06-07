@@ -11,53 +11,47 @@ def _vid(video_id: str) -> dict:
     return {"video_id": video_id, "title": f"title {video_id}", "url": f"http://x/{video_id}"}
 
 
-def test_bug2_empty_fetch_does_not_overwrite_cache(monkeypatch):
-    """A transient empty fetch must not clobber a populated cache."""
-    cached = [_vid(c) for c in "abcde"]
-    monkeypatch.setattr(p, "load_video_list", lambda: list(cached))
-    monkeypatch.setattr(p, "fetch_video_list", lambda **k: [])
+def test_bug2_run_fetch_delegates_to_save_fetch_result(monkeypatch):
+    """run_fetch must persist via the shared guarded helper, not raw save.
 
-    saved = []
-    monkeypatch.setattr(p, "save_video_list", lambda videos: saved.append(list(videos)))
-
-    result = p.run_fetch(use_cached=False)
-
-    assert saved == [], "save_video_list must not be called on empty fetch"
-    ids = [v["video_id"] for v in result]
-    assert ids == list("abcde"), "must return the existing cached list"
-
-
-def test_bug2_truncated_fetch_does_not_overwrite_cache(monkeypatch):
-    """A fetch far smaller than the cache (< 50%) must not overwrite it."""
-    cached = [_vid(str(i)) for i in range(10)]
-    truncated = [_vid("0"), _vid("1")]  # only 20% of the cache
-    monkeypatch.setattr(p, "load_video_list", lambda: list(cached))
-    monkeypatch.setattr(p, "fetch_video_list", lambda **k: list(truncated))
-
-    saved = []
-    monkeypatch.setattr(p, "save_video_list", lambda videos: saved.append(list(videos)))
-
-    result = p.run_fetch(use_cached=False)
-
-    assert saved == [], "save_video_list must not overwrite with truncated fetch"
-    assert len(result) == 10, "must keep the full cached list"
-
-
-def test_bug2_valid_fetch_still_saves(monkeypatch):
-    """A plausibly-complete fetch still overwrites the cache as before."""
-    cached = [_vid("a"), _vid("b")]
+    The empty/truncated-fetch guard lives in fetcher.save_fetch_result (tested
+    directly in test_fetcher.py). Here we verify run_fetch routes the fresh
+    fetch through that helper and returns whatever it decides is authoritative.
+    """
     fresh = [_vid(str(i)) for i in range(5)]
-    monkeypatch.setattr(p, "load_video_list", lambda: list(cached))
     monkeypatch.setattr(p, "fetch_video_list", lambda **k: list(fresh))
 
-    saved = []
-    monkeypatch.setattr(p, "save_video_list", lambda videos: saved.append(list(videos)))
+    calls = []
+
+    def fake_save_fetch_result(videos):
+        calls.append(list(videos))
+        return list(videos)
+
+    monkeypatch.setattr(p, "save_fetch_result", fake_save_fetch_result)
+    # run_fetch must NOT call raw save_video_list directly any more.
+    monkeypatch.setattr(
+        p, "save_video_list",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("raw save bypassed guard")),
+    )
 
     result = p.run_fetch(use_cached=False)
 
-    assert len(saved) == 1, "valid fetch must be persisted"
-    assert [v["video_id"] for v in saved[0]] == [str(i) for i in range(5)]
-    assert len(result) == 5
+    assert len(calls) == 1, "run_fetch must delegate to save_fetch_result exactly once"
+    assert [v["video_id"] for v in calls[0]] == [str(i) for i in range(5)]
+    assert [v["video_id"] for v in result] == [str(i) for i in range(5)]
+
+
+def test_bug2_run_fetch_returns_retained_cache_when_guard_keeps_it(monkeypatch):
+    """When the guard keeps the cache, run_fetch returns that (not the fresh)."""
+    fresh: list[dict] = []  # transient empty fetch
+    retained = [_vid(c) for c in "abcde"]
+    monkeypatch.setattr(p, "fetch_video_list", lambda **k: list(fresh))
+    # Simulate the guard deciding to keep the existing cache.
+    monkeypatch.setattr(p, "save_fetch_result", lambda videos: list(retained))
+
+    result = p.run_fetch(use_cached=False)
+
+    assert [v["video_id"] for v in result] == list("abcde")
 
 
 def test_bug2_use_cached_true_unchanged(monkeypatch):
@@ -70,7 +64,7 @@ def test_bug2_use_cached_true_unchanged(monkeypatch):
 
     monkeypatch.setattr(p, "fetch_video_list", boom)
     saved = []
-    monkeypatch.setattr(p, "save_video_list", lambda videos: saved.append(list(videos)))
+    monkeypatch.setattr(p, "save_fetch_result", lambda videos: saved.append(list(videos)))
 
     result = p.run_fetch(use_cached=True)
 

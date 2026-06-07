@@ -403,6 +403,30 @@ def save_video_list(videos: list[dict[str, Any]], path: Path | None = None) -> P
 def load_video_list(path: Path | None = None) -> list[dict[str, Any]]:
     """Load a previously saved video list.
 
+def save_fetch_result(
+    fresh: list[dict[str, Any]],
+    path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Persist a freshly-fetched video list, guarding against bad fetches.
+
+    A transient yt-dlp/scrapetube hiccup can return an empty or heavily
+    truncated list. Blindly overwriting the cache with it would destroy the
+    good on-disk history, and a subsequent ``purge`` would then treat the
+    truncated list as the allow-set and delete valid indexed videos from
+    Qdrant. So we refuse to overwrite when a populated cache already exists and
+    the fresh result is empty or less than half its size; in that case the
+    existing cache is kept and returned unchanged.
+
+    Returns the list that is now authoritative on disk (either ``fresh`` after
+    a successful save, or the retained ``cached`` list).
+    """
+    cached = load_video_list(path)
+    if cached and (not fresh or len(fresh) < len(cached) * 0.5):
+        return cached
+    save_video_list(fresh, path)
+    return fresh
+
+
     Tolerates a missing, empty, or corrupt cache file by returning an empty
     list instead of raising.
     """

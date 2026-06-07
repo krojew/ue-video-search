@@ -13,7 +13,13 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 
 from .config import WHISPER_MODEL
 from .embeddings import build_chunk_embed_text, embed_texts
-from .fetcher import fetch_video_list, load_video_list, merge_video_lists, save_video_list
+from .fetcher import (
+    fetch_video_list,
+    load_video_list,
+    merge_video_lists,
+    save_fetch_result,
+    save_video_list,
+)
 from .transcriber import download_audio, load_transcript, load_whisper_model, process_video
 from .vectordb import ensure_collection, get_client, list_indexed_video_ids, upsert_chunks
 
@@ -35,29 +41,25 @@ def run_fetch(
             return videos
 
     console.print("[bold]Fetching video list from YouTube channel...[/bold]")
-    videos = fetch_video_list(
+    fresh = fetch_video_list(
         skip_uefn=skip_uefn,
         skip_automotive=skip_automotive,
         skip_archvis=skip_archvis,
         include_streams=include_streams,
     )
 
-    # Guard against a transient fetch that returns nothing or far fewer videos
-    # than we already have on disk. Blindly overwriting would destroy the good
-    # cache, and `purge` would then treat the truncated list as the allow-set
-    # and delete valid indexed videos. Only overwrite when the fetch looks
-    # plausibly complete.
-    cached = load_video_list()
-    if cached and (not videos or len(videos) < len(cached) * 0.5):
+    # save_fetch_result refuses to clobber a populated cache with an empty or
+    # heavily-truncated fetch (which would also let `purge` delete valid
+    # indexed videos). It returns whichever list is now authoritative on disk.
+    videos = save_fetch_result(fresh)
+    if videos is not fresh:
         console.print(
-            f"[yellow]Warning: fresh fetch returned {len(videos)} video(s) but "
-            f"{len(cached)} are cached on disk. Keeping the existing cache "
+            f"[yellow]Warning: fresh fetch returned {len(fresh)} video(s) but "
+            f"{len(videos)} are cached on disk. Keeping the existing cache "
             f"instead of overwriting it with a likely-incomplete result.[/yellow]"
         )
-        return cached
-
-    save_video_list(videos)
-    console.print(f"[green]Found {len(videos)} videos matching criteria.[/green]")
+    else:
+        console.print(f"[green]Found {len(videos)} videos matching criteria.[/green]")
     return videos
 
 

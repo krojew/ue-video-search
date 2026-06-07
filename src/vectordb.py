@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import threading
 import uuid
 from typing import Any
 
@@ -22,12 +23,18 @@ from .config import COLLECTION_NAME, EMBEDDING_DIM, QDRANT_HOST, QDRANT_PORT
 
 
 _client: QdrantClient | None = None
+_client_lock = threading.Lock()
 
 
 def get_client() -> QdrantClient:
     global _client
+    # Double-checked locking: the lazy singleton is reachable from multiple
+    # threads (the ingest worker thread and webapp executor workers), so an
+    # unsynchronized check-then-create could build — and leak — two clients.
     if _client is None:
-        _client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=300)
+        with _client_lock:
+            if _client is None:
+                _client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT, timeout=300)
     return _client
 
 

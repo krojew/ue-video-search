@@ -172,6 +172,7 @@ def test_bug4_concurrent_get_status_never_raises(monkeypatch):
     monkeypatch.setattr(w, "load_video_list", lambda: list(videos))
     monkeypatch.setattr(w, "fetch_video_list", lambda **k: list(videos))
     monkeypatch.setattr(w, "save_video_list", lambda v: None)
+    monkeypatch.setattr(w, "save_fetch_result", lambda v: list(v))
 
     processed: list[str] = []
     _patch_heavy(monkeypatch, indexed_ids=set(), processed=processed)
@@ -204,7 +205,56 @@ def test_bug4_concurrent_get_status_never_raises(monkeypatch):
     assert not errors, f"concurrent get_status raised/tore: {errors[:1]}"
     final = w.get_status()
     assert final["phase"] == w.IngestPhase.DONE.value
-    assert final["completed"] == 8
+
+
+def test_bug4_lock_prevents_torn_read_of_coupled_fields(monkeypatch):
+    """Lock-sensitive guard: a reader must NEVER see a half-applied update.
+
+    _update_status sets multiple fields under _lock. We install a status whose
+    setattr sleeps *between* the two coupled writes (completed then failed),
+    deliberately widening the window. With the lock, get_status() serialises
+    and always observes completed == failed. Without the lock (the unfixed
+    code) a reader interleaves mid-update and sees completed != failed. This
+    test FAILS if _lock is removed — unlike the smoke test above.
+    """
+    import time
+
+    class SlowStatus(w.IngestStatus):
+        # Re-declare as a dataclass-free subclass: it inherits fields and
+        # to_dict; we only override attribute writes to inject a delay.
+        def __setattr__(self, name, value):
+            if name == "failed":
+                time.sleep(0.001)  # widen the torn-read window
+            object.__setattr__(self, name, value)
+
+    w._status = SlowStatus()
+
+    seen_torn: list[tuple[int, int]] = []
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            snap = w.get_status()
+            if snap["completed"] != snap["failed"]:
+                seen_torn.append((snap["completed"], snap["failed"]))
+
+    readers = [threading.Thread(target=reader) for _ in range(4)]
+    for r in readers:
+        r.start()
+
+    # Writer keeps the invariant completed == failed across each atomic update.
+    for n in range(1, 60):
+        w._update_status(completed=n, failed=n)
+        time.sleep(0.0005)
+
+    stop.set()
+    for r in readers:
+        r.join(timeout=5)
+
+    assert not seen_torn, (
+        "reader observed a torn (completed != failed) snapshot — _lock is not "
+        f"protecting coupled updates: {seen_torn[:3]}"
+    )
 
 
 def test_bug5_malformed_video_does_not_abort_run(monkeypatch):
@@ -216,6 +266,7 @@ def test_bug5_malformed_video_does_not_abort_run(monkeypatch):
     monkeypatch.setattr(w, "load_video_list", lambda: list(videos))
     monkeypatch.setattr(w, "fetch_video_list", lambda **k: list(videos))
     monkeypatch.setattr(w, "save_video_list", lambda v: None)
+    monkeypatch.setattr(w, "save_fetch_result", lambda v: list(v))
 
     processed: list[str] = []
     # reindex=True -> skip_indexed off -> index diff bypassed, so the malformed

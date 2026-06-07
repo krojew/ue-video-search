@@ -111,10 +111,7 @@ def _emit_locked(data: dict[str, Any]) -> None:
             pass
 
 
-def _emit(status: IngestStatus) -> None:
-    """Snapshot the status under ``_lock`` and push it to subscribers."""
-    with _lock:
-        _emit_locked(status.to_dict())
+
 
 
 def _update_status(*, inc: dict[str, int] | None = None, **fields: Any) -> None:

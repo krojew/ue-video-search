@@ -19,12 +19,14 @@ def cli() -> None:
 
 @cli.command()
 @click.option("--refresh", is_flag=True, help="Re-fetch video list from YouTube instead of using cache.")
+@click.option("--force", is_flag=True, help="With --refresh, allow a large catalog shrink to overwrite the cache (bypasses the shrink guard).")
 @click.option("--skip-uefn/--no-skip-uefn", default=True, help="Skip videos with UEFN or Fortnite in title (default: True).")
 @click.option("--skip-automotive/--no-skip-automotive", default=True, help="Skip videos with automotive in title (default: True).")
 @click.option("--skip-archvis/--no-skip-archvis", default=True, help="Skip videos with archvis in title (default: True).")
 @click.option("--include-streams/--no-include-streams", default=True, help="Include videos from the Live/streams tab (default: True).")
 def fetch(
     refresh: bool,
+    force: bool,
     skip_uefn: bool,
     skip_automotive: bool,
     skip_archvis: bool,
@@ -39,6 +41,7 @@ def fetch(
         skip_automotive=skip_automotive,
         skip_archvis=skip_archvis,
         include_streams=include_streams,
+        force=force,
     )
 
     table = Table(title=f"Videos ({len(videos)})")
@@ -55,6 +58,7 @@ def fetch(
 
 @cli.command()
 @click.option("--refresh", is_flag=True, help="Re-fetch video list before ingesting.")
+@click.option("--force", is_flag=True, help="With --refresh, allow a large catalog shrink to overwrite the cache (bypasses the shrink guard).")
 @click.option("--reindex", is_flag=True, help="Re-index videos even if already in Qdrant.")
 @click.option("--update", is_flag=True, help="Incremental mode: fetch new videos only and ingest them.")
 @click.option("--skip-uefn/--no-skip-uefn", default=True, help="Skip videos with UEFN or Fortnite in title (default: True).")
@@ -63,6 +67,7 @@ def fetch(
 @click.option("--include-streams/--no-include-streams", default=True, help="Include videos from the Live/streams tab (default: True).")
 def ingest(
     refresh: bool,
+    force: bool,
     reindex: bool,
     update: bool,
     skip_uefn: bool,
@@ -93,6 +98,7 @@ def ingest(
         skip_automotive=skip_automotive,
         skip_archvis=skip_archvis,
         include_streams=include_streams,
+        force=force,
     )
     run_ingest(
         videos,

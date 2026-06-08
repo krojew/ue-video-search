@@ -32,8 +32,15 @@ def run_fetch(
     skip_automotive: bool = True,
     skip_archvis: bool = True,
     include_streams: bool = True,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
-    """Fetch (or load cached) video list from the channel."""
+    """Fetch (or load cached) video list from the channel.
+
+    ``force=True`` bypasses the shrink guard in save_fetch_result, for a
+    deliberate large catalog shrink (e.g. tightening filters or lowering
+    MAX_AGE_YEARS) where the smaller list is intended to replace the cache so
+    ``purge`` can act on it.
+    """
     if use_cached:
         videos = load_video_list()
         if videos:
@@ -51,12 +58,14 @@ def run_fetch(
     # save_fetch_result refuses to clobber a populated cache with an empty or
     # heavily-truncated fetch (which would also let `purge` delete valid
     # indexed videos). It returns whichever list is now authoritative on disk.
-    videos = save_fetch_result(fresh)
+    # `force` overrides the guard for an intentional shrink.
+    videos = save_fetch_result(fresh, force=force)
     if videos is not fresh:
         console.print(
             f"[yellow]Warning: fresh fetch returned {len(fresh)} video(s) but "
             f"{len(videos)} are cached on disk. Keeping the existing cache "
-            f"instead of overwriting it with a likely-incomplete result.[/yellow]"
+            f"instead of overwriting it with a likely-incomplete result. "
+            f"Re-run with --force if this shrink is intentional.[/yellow]"
         )
     else:
         console.print(f"[green]Found {len(videos)} videos matching criteria.[/green]")

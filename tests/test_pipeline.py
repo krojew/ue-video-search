@@ -23,7 +23,7 @@ def test_bug2_run_fetch_delegates_to_save_fetch_result(monkeypatch):
 
     calls = []
 
-    def fake_save_fetch_result(videos):
+    def fake_save_fetch_result(videos, force=False):
         calls.append(list(videos))
         return list(videos)
 
@@ -47,7 +47,7 @@ def test_bug2_run_fetch_returns_retained_cache_when_guard_keeps_it(monkeypatch):
     retained = [_vid(c) for c in "abcde"]
     monkeypatch.setattr(p, "fetch_video_list", lambda **k: list(fresh))
     # Simulate the guard deciding to keep the existing cache.
-    monkeypatch.setattr(p, "save_fetch_result", lambda videos: list(retained))
+    monkeypatch.setattr(p, "save_fetch_result", lambda videos, force=False: list(retained))
 
     result = p.run_fetch(use_cached=False)
 

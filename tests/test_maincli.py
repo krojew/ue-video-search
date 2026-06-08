@@ -192,3 +192,38 @@ def test_interactive_survives_connection_error_via_eof(monkeypatch):
     # The loop survived the backend error and exited cleanly (no exception
     # propagated out of the command).
     assert result.exception is None
+
+
+# --- R3: --force flows through to run_fetch ----------------------------------
+
+import src.pipeline as pipeline_mod
+
+
+def _stub_run_fetch(captured):
+    def _run_fetch(**kwargs):
+        captured.update(kwargs)
+        return []  # empty list -> fetch command prints an empty table, exit 0
+    return _run_fetch
+
+
+def test_fetch_force_flag_passed_through(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(pipeline_mod, "run_fetch", _stub_run_fetch(captured))
+
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.cli, ["fetch", "--refresh", "--force"])
+
+    assert result.exit_code == 0
+    assert captured.get("force") is True
+    assert captured.get("use_cached") is False
+
+
+def test_fetch_without_force_defaults_false(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setattr(pipeline_mod, "run_fetch", _stub_run_fetch(captured))
+
+    runner = CliRunner()
+    result = runner.invoke(cli_mod.cli, ["fetch", "--refresh"])
+
+    assert result.exit_code == 0
+    assert captured.get("force") is False

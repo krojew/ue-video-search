@@ -334,6 +334,178 @@ def test_yt_dlp_fetch_passes_timeout_and_skips_on_timeout(monkeypatch):
     assert seen["timeout"] is not None and seen["timeout"] > 0
 
 
+# ── BUG: flaky approximate_date scrape silently drops the newest videos ──────
+#
+# yt-dlp's youtubetab:approximate_date extractor intermittently returns a whole
+# tab with `timestamp`/`upload_date` missing on EVERY entry. fetch_video_list
+# drops undated videos to enforce the age cutoff, so a glitched batch silently
+# erases the newest videos — most visibly past livestreams on the /streams tab.
+# _scrape_tab_entries retries the per-tab scrape when it detects that
+# all-or-nothing dropout.
+
+
+class _FakeCompleted:
+    def __init__(self, stdout):
+        self.stdout = stdout
+
+
+def _payload(entries):
+    return json.dumps({"entries": entries})
+
+
+def _url_aware_fake_run(responses_by_url):
+    """Build a fake subprocess.run keyed by a substring of the target URL.
+
+    ``responses_by_url`` maps a url substring to a list of per-attempt entry
+    lists; the Nth call for that url returns the Nth list (clamping to the last
+    once exhausted). Records call counts so tests can assert retry behaviour.
+    """
+    state = {"total": 0, "per_url": {}}
+
+    def fake_run(cmd, *a, **k):
+        url = cmd[-1]
+        state["total"] += 1
+        for key, sequence in responses_by_url.items():
+            if key in url:
+                idx = state["per_url"].get(key, 0)
+                state["per_url"][key] = idx + 1
+                entries = sequence[min(idx, len(sequence) - 1)]
+                return _FakeCompleted(_payload(entries))
+        return _FakeCompleted(_payload([]))
+
+    return fake_run, state
+
+
+def test_scrape_tab_retries_when_whole_batch_is_undated(monkeypatch):
+    """A wholesale-undated batch is retried; the dated retry result wins.
+
+    Discriminates the fix: without the retry the first (undated) batch would be
+    returned and its entries dropped downstream. We assert the returned entry
+    carries the date from the SECOND attempt.
+    """
+    undated = [{"id": "VID1", "title": "Inside Unreal", "duration": 5600}]
+    dated = [
+        {
+            "id": "VID1",
+            "title": "Inside Unreal",
+            "duration": 5600,
+            "timestamp": 1780617600,
+        }
+    ]
+    fake_run, state = _url_aware_fake_run({"/streams": [undated, dated]})
+    monkeypatch.setattr(fetcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(fetcher.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+
+    entries = fetcher._scrape_tab_entries(["/usr/bin/yt-dlp"], "https://x/streams")
+
+    assert state["per_url"]["/streams"] == 2, "undated batch must trigger one retry"
+    assert len(entries) == 1
+    assert entries[0]["timestamp"] == 1780617600, "the dated retry result must win"
+
+
+def test_scrape_tab_gives_up_and_warns_after_max_attempts(monkeypatch, capsys):
+    """If every attempt is undated, the batch is returned (not lost) with a warning.
+
+    The videos are still surfaced to the caller; they will be dropped by the
+    age filter (no date to test against), but the operator is told why via
+    stderr so the loss is never silent.
+    """
+    undated = [{"id": "VID1", "title": "Inside Unreal", "duration": 5600}]
+    fake_run, state = _url_aware_fake_run({"/streams": [undated]})
+    monkeypatch.setattr(fetcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(fetcher.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+
+    entries = fetcher._scrape_tab_entries(
+        ["/usr/bin/yt-dlp"], "https://x/streams", max_attempts=3
+    )
+
+    assert state["per_url"]["/streams"] == 3, "must exhaust all attempts"
+    assert len(entries) == 1, "the undated batch is still returned, not swallowed"
+    warning = capsys.readouterr().err
+    assert "no parseable dates" in warning
+    assert "/streams" in warning
+
+
+def test_scrape_tab_does_not_retry_on_subprocess_error(monkeypatch):
+    """A hard subprocess failure/timeout is NOT retried (returns [] at once)."""
+    calls = {"n": 0}
+
+    def fake_run(cmd, *a, **k):
+        calls["n"] += 1
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=k.get("timeout"))
+
+    monkeypatch.setattr(fetcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(fetcher.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+
+    entries = fetcher._scrape_tab_entries(
+        ["/usr/bin/yt-dlp"], "https://x/streams", max_attempts=3
+    )
+
+    assert entries == []
+    assert calls["n"] == 1, "subprocess errors must not be retried"
+
+
+def test_scrape_tab_no_retry_when_some_entries_dated(monkeypatch):
+    """A normal batch where at least one entry is dated is returned immediately.
+
+    Upcoming/scheduled streams legitimately lack a date; their presence
+    alongside dated entries must NOT be mistaken for the dropout glitch.
+    """
+    mixed = [
+        {"id": "SCHED", "title": "Upcoming Stream", "duration": None},
+        {
+            "id": "VID1",
+            "title": "Inside Unreal",
+            "duration": 5600,
+            "timestamp": 1780617600,
+        },
+    ]
+    fake_run, state = _url_aware_fake_run({"/streams": [mixed]})
+    monkeypatch.setattr(fetcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(fetcher.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+
+    entries = fetcher._scrape_tab_entries(["/usr/bin/yt-dlp"], "https://x/streams")
+
+    assert state["per_url"]["/streams"] == 1, "a partially-dated batch is not retried"
+    assert len(entries) == 2
+
+
+def test_fetch_video_list_recovers_flaky_stream_after_retry(monkeypatch):
+    """End-to-end: a new livestream survives a glitched first /streams scrape.
+
+    This is the user-reported scenario — a past livestream (only on /streams)
+    vanished from `ingest --update` because the streams scrape came back
+    wholesale-undated. With the retry, the second attempt's date lands and the
+    video flows all the way through fetch_video_list.
+    """
+    recent_ts = int(
+        (datetime.now(timezone.utc) - timedelta(days=10)).timestamp()
+    )
+    target_undated = [
+        {"id": "STREAM1", "title": "Inside Unreal: Projectiles", "duration": 5600}
+    ]
+    target_dated = [
+        {
+            "id": "STREAM1",
+            "title": "Inside Unreal: Projectiles",
+            "duration": 5600,
+            "timestamp": recent_ts,
+        }
+    ]
+    # /videos tab returns nothing; the target lives only on /streams, whose
+    # first scrape is the glitched undated batch and second is healthy.
+    fake_run, _state = _url_aware_fake_run(
+        {"/videos": [[]], "/streams": [target_undated, target_dated]}
+    )
+    monkeypatch.setattr(fetcher.subprocess, "run", fake_run)
+    monkeypatch.setattr(fetcher.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+
+    results = fetch_video_list(include_streams=True)
+
+    ids = {v["video_id"] for v in results}
+    assert "STREAM1" in ids, "the new livestream must survive the flaky scrape"
+
+
 # ── R3 residuals: load_video_list shape validation ──────────────────────────
 
 

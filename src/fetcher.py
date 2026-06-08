@@ -119,6 +119,85 @@ def _format_duration(seconds: int | None) -> str:
     return f"{minutes}:{secs:02}"
 
 
+def _scrape_tab_entries(
+    yt_dlp_cmd: list[str],
+    url: str,
+    max_attempts: int = 3,
+) -> list[dict[str, Any]]:
+    """Run a flat-playlist yt-dlp scrape of one channel tab, with date retry.
+
+    Returns the raw ``entries`` list from yt-dlp's single-JSON dump (an empty
+    list on any subprocess/parse failure or timeout — the caller then skips
+    this tab).
+
+    The ``youtubetab:approximate_date`` extractor is the ONLY source of publish
+    dates in a flat-playlist scrape, and it intermittently glitches: a single
+    invocation comes back with ``timestamp`` (and ``upload_date``) missing on
+    EVERY entry, even though the entries themselves are valid. fetch_video_list
+    drops undated videos to enforce the age cutoff, so a glitched batch
+    silently erases the newest videos — most visibly past livestreams, which
+    live only on the /streams tab. We detect that all-or-nothing dropout
+    (entries present but NOT ONE carrying a usable date) and retry the scrape;
+    the glitch is per-process and clears on a fresh invocation. A genuinely
+    undated batch (rare) merely exhausts the retries and is returned as-is,
+    with a warning so the drop is never silent.
+
+    Subprocess errors and timeouts are NOT retried: retrying a hard failure is
+    unlikely to help within the run's latency budget, and the per-call timeout
+    already bounds a hung yt-dlp.
+    """
+    entries: list[dict[str, Any]] = []
+    for _attempt in range(max_attempts):
+        try:
+            result = subprocess.run(
+                [
+                    *yt_dlp_cmd,
+                    "--no-warnings",
+                    "--flat-playlist",
+                    "--dump-single-json",
+                    # `approximate_date` populates the per-entry `timestamp`
+                    # field during a flat-playlist scrape. Without it,
+                    # upload dates are only available via per-video extraction
+                    # (~1s/video).
+                    "--extractor-args",
+                    "youtubetab:approximate_date",
+                    url,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                # Bound the fetch so a hung yt-dlp surfaces as
+                # TimeoutExpired (caught below) and this tab is skipped
+                # instead of blocking the whole run forever.
+                timeout=120,
+            )
+            payload = json.loads(result.stdout)
+        except Exception:
+            return []
+
+        entries = payload.get("entries", []) or []
+
+        # A usable date comes from `timestamp` or `upload_date`. A handful of
+        # entries legitimately lack both (e.g. upcoming/scheduled streams), so
+        # the dropout signature is: entries present, but NOT ONE is dated.
+        if not entries or any(
+            entry.get("timestamp") is not None or entry.get("upload_date")
+            for entry in entries
+        ):
+            return entries
+
+        # Wholesale-undated batch: the extractor glitched. Loop to retry with a
+        # fresh invocation (no backoff — it's a per-process flake).
+
+    print(
+        f"Warning: yt-dlp returned {len(entries)} entries for {url} with no "
+        f"parseable dates after {max_attempts} attempts; these videos will be "
+        f"dropped by the age filter. Re-run the fetch to pick them up.",
+        file=sys.stderr,
+    )
+    return entries
+
+
 def _fetch_channel_videos_with_yt_dlp(
     channel_url: str,
     include_streams: bool = True,
@@ -149,34 +228,7 @@ def _fetch_channel_videos_with_yt_dlp(
     seen_ids: set[str] = set()
 
     for url in urls:
-        try:
-            result = subprocess.run(
-                [
-                    *yt_dlp_cmd,
-                    "--no-warnings",
-                    "--flat-playlist",
-                    "--dump-single-json",
-                    # `approximate_date` populates the per-entry `timestamp`
-                    # field during a flat-playlist scrape. Without it,
-                    # upload dates are only available via per-video extraction
-                    # (~1s/video).
-                    "--extractor-args",
-                    "youtubetab:approximate_date",
-                    url,
-                ],
-                capture_output=True,
-                text=True,
-                check=True,
-                # Bound the fetch so a hung yt-dlp surfaces as
-                # TimeoutExpired (caught below) and this tab is skipped
-                # instead of blocking the whole run forever.
-                timeout=120,
-            )
-            payload = json.loads(result.stdout)
-        except Exception:
-            continue
-
-        entries = payload.get("entries", []) or []
+        entries = _scrape_tab_entries(yt_dlp_cmd, url)
         for entry in entries:
             video_id = entry.get("id")
             if not video_id or video_id in seen_ids:

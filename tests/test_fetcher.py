@@ -332,3 +332,54 @@ def test_yt_dlp_fetch_passes_timeout_and_skips_on_timeout(monkeypatch):
     )
     assert out == [], "a timed-out fetch must be skipped, not raised"
     assert seen["timeout"] is not None and seen["timeout"] > 0
+
+
+# ── R3 residuals: load_video_list shape validation ──────────────────────────
+
+
+def test_load_video_list_rejects_non_list_json(tmp_path):
+    """Well-formed JSON that isn't a list must return [] (not crash callers)."""
+    for payload in ['{"video_id": "x"}', '"hello"', "42", "true"]:
+        path = tmp_path / "videos.json"
+        path.write_text(payload)
+        assert load_video_list(path=path) == [], f"payload {payload!r} should yield []"
+
+
+def test_load_video_list_drops_non_dict_elements(tmp_path):
+    """Non-dict elements in the list are dropped so callers can assume dicts."""
+    path = tmp_path / "videos.json"
+    path.write_text('[{"video_id": "a"}, "junk", 5, {"video_id": "b"}]')
+    loaded = load_video_list(path=path)
+    assert [v["video_id"] for v in loaded] == ["a", "b"]
+
+
+# ── R3 residuals: _parse_relative_time word-boundary safety ─────────────────
+
+
+def test_parse_relative_time_no_false_positive_on_non_timestamp():
+    """Non-timestamp text that merely contains a unit substring returns None."""
+    assert _parse_relative_time("a yearly recap") is None
+    assert _parse_relative_time("an early second draft") is None
+    assert _parse_relative_time("seconds of footage") is None
+
+
+def test_parse_relative_time_still_parses_genuine_timestamps():
+    """Real YouTube relative strings still parse after the word-boundary change."""
+    now = datetime.now(timezone.utc)
+    assert _parse_relative_time("2 days ago") is not None
+    assert _parse_relative_time("Streamed 3 weeks ago") is not None
+    a_year = _parse_relative_time("a year ago")
+    assert a_year is not None and 360 <= (now - a_year).days <= 370
+
+
+# ── R3 residuals: save_fetch_result force override ──────────────────────────
+
+
+def test_save_fetch_result_force_overwrites_shrink(tmp_path):
+    """force=True replaces the cache even with a large shrink (intentional)."""
+    path = tmp_path / "videos.json"
+    save_video_list([{"video_id": str(i)} for i in range(10)], path=path)
+    shrunk = [{"video_id": "0"}]  # 10% — would be blocked without force
+    result = save_fetch_result(shrunk, path=path, force=True)
+    assert [v["video_id"] for v in result] == ["0"]
+    assert [v["video_id"] for v in load_video_list(path=path)] == ["0"]

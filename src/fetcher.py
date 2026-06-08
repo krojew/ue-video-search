@@ -49,7 +49,10 @@ def _parse_relative_time(text: str) -> datetime | None:
     """Best-effort parse of YouTube relative timestamps.
 
     Handles both regular uploads ("2 years ago") and streams
-    ("Streamed 2 years ago").
+    ("Streamed 2 years ago"), plus YouTube's single-unit phrasing
+    ("a year ago" / "an hour ago"). Units are matched at WORD BOUNDARIES so a
+    non-timestamp string like "a yearly recap" cannot accidentally match
+    "year" and fabricate a date — such input returns None (a safe skip).
     """
     text = text.lower().strip()
     now = datetime.now(timezone.utc)
@@ -67,19 +70,14 @@ def _parse_relative_time(text: str) -> datetime | None:
         ("minute", lambda n: timedelta(minutes=n)),
         ("second", lambda n: timedelta(seconds=n)),
     ]:
-        if unit in text:
-            # Extract the first integer token (skips leading words like "Streamed")
-            for token in text.split():
-                try:
-                    num = int(token)
-                    return now - delta_fn(num)
-                except ValueError:
-                    continue
-            # No integer token found, but a unit word is present. YouTube uses
-            # "a year ago" / "an hour ago" for a single unit -> treat as 1.
-            if "a" in text.split() or "an" in text.split():
-                return now - delta_fn(1)
-            return None
+        # Word-boundary match, allowing an optional plural 's' (year/years).
+        m = re.search(rf"\b(\d+|a|an)\s+{unit}s?\b\s+ago\b", text)
+        if not m:
+            continue
+        qty = m.group(1)
+        if qty in ("a", "an"):
+            return now - delta_fn(1)
+        return now - delta_fn(int(qty))
 
     # Support ISO-style dates in fallback mode
     try:
@@ -438,14 +436,21 @@ def load_video_list(path: Path | None = None) -> list[dict[str, Any]]:
     """Load a previously saved video list.
 
     Tolerates a missing, empty, or corrupt cache file by returning an empty
-    list. A genuine I/O error (e.g. permission denied) on an existing file is
-    NOT swallowed — it propagates, so callers don't mistake an unreadable cache
-    for an empty one and then overwrite the good history.
+    list. "Corrupt" includes well-formed JSON that is not a list of dicts
+    (e.g. an object, string, or number) — returning that verbatim would crash
+    downstream callers that iterate/merge it. A genuine I/O error (e.g.
+    permission denied) on an existing file is NOT swallowed — it propagates, so
+    callers don't mistake an unreadable cache for an empty one and overwrite
+    the good history.
     """
     path = path or DATA_DIR / "videos.json"
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except (json.JSONDecodeError, ValueError):
         return []
+    if not isinstance(data, list):
+        return []
+    # Drop any non-dict elements so callers can rely on dict access.
+    return [v for v in data if isinstance(v, dict)]

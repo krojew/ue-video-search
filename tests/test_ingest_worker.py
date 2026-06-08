@@ -380,6 +380,33 @@ def test_bug5_malformed_video_skip_indexed_true_does_not_abort(monkeypatch):
     assert processed == ["good"], "the good video must still be processed"
 
 
+def test_silent_video_counts_as_skipped_not_failed(monkeypatch):
+    """A silent video (process_video returns []) is skipped, not failed.
+
+    Aligns the worker with the CLI: [] is a normal, retry-eligible outcome, so
+    it must bump `skipped` (not `failed`) and not be counted as 'indexed'.
+    """
+    videos = [_vid("silent")]
+    monkeypatch.setattr(w, "load_video_list", lambda: list(videos))
+    monkeypatch.setattr(w, "fetch_video_list", lambda **k: list(videos))
+    monkeypatch.setattr(w, "save_video_list", lambda v: None)
+    monkeypatch.setattr(w, "save_fetch_result", lambda v: list(v))
+
+    processed: list[str] = []
+    _patch_heavy(monkeypatch, indexed_ids=set(), processed=processed)
+    # Override process_video to simulate a silent video (no speech).
+    monkeypatch.setattr(w, "process_video", lambda vid, url, model=None: [])
+
+    w._run_ingest(incremental=False, reindex=False)
+
+    snap = w.get_status()
+    assert snap["phase"] == w.IngestPhase.DONE.value
+    assert snap["failed"] == 0, "a silent video must NOT be counted as failed"
+    assert snap["skipped"] == 1, "a silent video must be counted as skipped"
+    # 'indexed' in the summary = completed - failed - silent = 0.
+    assert "0 indexed" in snap["message"], snap["message"]
+
+
 def test_bug1_incremental_reindex_off_unchanged_when_all_indexed(monkeypatch):
     """When everything cached is already indexed, nothing is processed."""
     cached = [_vid("a"), _vid("b")]

@@ -283,6 +283,10 @@ def _run_ingest(
             # transcription.
             pending: Future[Any] | None = _submit_prefetch(downloader, to_process[0])
 
+            # Videos with no detectable speech: counted as skipped (not failed),
+            # tracked locally so the "indexed" summary math stays correct.
+            silent = 0
+
             for i, video in enumerate(to_process):
                 # Snapshot the in-flight future for *this* video before
                 # swapping `pending` to the next one. _submit_prefetch
@@ -315,7 +319,15 @@ def _run_ingest(
 
                     segments = process_video(vid, url, model=model)
                     if not segments:
-                        _update_status(inc={"failed": 1, "completed": 1})
+                        # No speech detected (not a failure — process_video
+                        # returns [] for silent videos by design and they are
+                        # retry-eligible next run). Count as skipped, matching
+                        # the CLI, and advance progress without bumping failed.
+                        silent += 1
+                        _update_status(
+                            inc={"completed": 1, "skipped": 1},
+                            message=f"No speech detected: {title[:80]} (will retry next run)",
+                        )
                         continue
 
                     texts = [build_chunk_embed_text(title, seg["text"]) for seg in segments]
@@ -341,7 +353,7 @@ def _run_ingest(
             current_video="",
             message=(
                 f"Ingest complete. "
-                f"{snap['completed'] - snap['failed']} indexed, "
+                f"{snap['completed'] - snap['failed'] - silent} indexed, "
                 f"{snap['failed']} failed, "
                 f"{snap['skipped']} skipped."
             ),

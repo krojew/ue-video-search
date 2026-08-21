@@ -5,6 +5,7 @@ is monkeypatched, and AUDIO_DIR / TRANSCRIPT_DIR are redirected at tmp dirs.
 """
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -217,3 +218,152 @@ def test_download_audio_passes_timeout(dirs, monkeypatch):
 
     transcriber.download_audio("vidok", "http://x")
     assert captured.get("timeout") is not None
+
+
+# ── Long audio must be transcribed in bounded slices (OOM guard) ──────────
+#
+# faster-whisper holds the whole decoded track plus a log-mel spectrogram of it
+# in memory, so a single pass over a 2h+ video peaked at ~8.7 GB RSS and got the
+# 8 GB container OOM-killed mid-run. The kill raises no Python exception, so the
+# ingest worker never reported it and every video queued behind it was dropped.
+
+
+class _FakeSegment:
+    def __init__(self, start, end, text):
+        self.start = start
+        self.end = end
+        self.text = text
+
+
+class _FakeModel:
+    """Records what it was handed and replays canned segments per call."""
+
+    def __init__(self, per_call):
+        self.per_call = list(per_call)
+        self.calls = []
+
+    def transcribe(self, audio, **kwargs):
+        self.calls.append(audio)
+        segments = self.per_call.pop(0) if self.per_call else []
+        return iter([_FakeSegment(*s) for s in segments]), None
+
+
+def _slice_env(monkeypatch, *, slice_secs, overlap, duration, decoded_len=16000):
+    """Configure slicing and stub out duration probing / ffmpeg decoding."""
+    monkeypatch.setattr(transcriber, "TRANSCRIBE_SLICE_SECONDS", slice_secs)
+    monkeypatch.setattr(transcriber, "TRANSCRIBE_SLICE_OVERLAP_SECONDS", overlap)
+    monkeypatch.setattr(transcriber, "_probe_duration", lambda p: duration)
+
+    decoded = []
+
+    def _fake_decode(path, start, dur):
+        decoded.append((round(start, 3), round(dur, 3)))
+        return transcriber.np.zeros(decoded_len, dtype=transcriber.np.float32)
+
+    monkeypatch.setattr(transcriber, "_decode_slice", _fake_decode)
+    return decoded
+
+
+def test_short_audio_still_takes_the_single_pass_path(monkeypatch):
+    """Audio under the slice length must hand the PATH to faster-whisper, unchanged."""
+    _slice_env(monkeypatch, slice_secs=1200, overlap=5, duration=600.0)
+    model = _FakeModel([[(0.0, 2.0, "hello")]])
+
+    out = transcriber.transcribe_audio(Path("/tmp/short.opus"), model=model)
+
+    assert model.calls == ["/tmp/short.opus"], "short audio should not be sliced"
+    assert out and out[0]["text"] == "hello"
+
+
+def test_long_audio_is_decoded_in_bounded_slices(monkeypatch):
+    """Each ffmpeg decode must cover at most one slice, never the whole file."""
+    decoded = _slice_env(monkeypatch, slice_secs=1200, overlap=5, duration=3000.0)
+    model = _FakeModel([[(0.0, 1.0, "a")], [(0.0, 1.0, "b")], [(0.0, 1.0, "c")]])
+
+    transcriber.transcribe_audio(Path("/tmp/long.opus"), model=model)
+
+    # 3000s at 1200s slices → 3 slices; each reads its own span plus left overlap.
+    assert decoded == [(0.0, 1200.0), (1195.0, 1205.0), (2395.0, 605.0)]
+    assert all(dur <= 1200.0 + 5 for _start, dur in decoded), "slice exceeded its bound"
+    # The model must receive sample arrays, never the whole-file path.
+    assert all(not isinstance(c, str) for c in model.calls)
+
+
+def test_slice_timestamps_are_offset_onto_the_file_timeline(monkeypatch):
+    """A segment found inside slice 2 must report its position in the whole file."""
+    _slice_env(monkeypatch, slice_secs=1200, overlap=5, duration=2000.0)
+    # Slice 2 reads from 1195.0; a hit 10s in sits at 1205.0 on the file timeline.
+    model = _FakeModel([[(0.0, 1.0, "first")], [(10.0, 20.0, "second")]])
+
+    out = transcriber.transcribe_audio(Path("/tmp/long.opus"), model=model)
+
+    texts = " ".join(c["text"] for c in out)
+    assert "second" in texts
+    assert any(abs(c["start"] - 1205.0) < 0.01 or abs(c["end"] - 1215.0) < 0.01 for c in out), (
+        f"slice-2 timestamps were not offset onto the file timeline: {out}"
+    )
+
+
+def test_overlap_region_is_not_emitted_twice(monkeypatch):
+    """Re-read overlap gives left context only; it must not duplicate segments."""
+    _slice_env(monkeypatch, slice_secs=1200, overlap=5, duration=2000.0)
+    # Slice 2 starts reading at 1195.0 and re-hears the tail slice 1 already
+    # emitted (offset 0.0-3.0 → 1195.0-1198.0, before the 1200.0 boundary).
+    model = _FakeModel(
+        [
+            [(1190.0, 1198.0, "tail")],
+            [(0.0, 3.0, "tail"), (10.0, 12.0, "fresh")],
+        ]
+    )
+
+    out = transcriber.transcribe_audio(Path("/tmp/long.opus"), model=model)
+
+    joined = " ".join(c["text"] for c in out)
+    assert joined.count("tail") == 1, f"overlap duplicated a segment: {joined}"
+    assert "fresh" in joined
+
+
+def test_slicing_disabled_falls_back_to_single_pass(monkeypatch):
+    """TRANSCRIBE_SLICE_SECONDS=0 must restore the original whole-file behaviour."""
+    _slice_env(monkeypatch, slice_secs=0, overlap=0, duration=99999.0)
+    model = _FakeModel([[(0.0, 1.0, "whole")]])
+
+    transcriber.transcribe_audio(Path("/tmp/long.opus"), model=model)
+
+    assert model.calls == ["/tmp/long.opus"]
+
+
+def test_unknown_duration_falls_back_to_single_pass(monkeypatch):
+    """If the container has no duration we cannot slice; do not guess."""
+    _slice_env(monkeypatch, slice_secs=1200, overlap=5, duration=None)
+    model = _FakeModel([[(0.0, 1.0, "whole")]])
+
+    transcriber.transcribe_audio(Path("/tmp/long.opus"), model=model)
+
+    assert model.calls == ["/tmp/long.opus"]
+
+
+def test_decode_slice_requests_a_bounded_span_from_ffmpeg(monkeypatch):
+    """_decode_slice must pass -ss/-t so ffmpeg never decodes the whole file."""
+    monkeypatch.setattr(transcriber.shutil, "which", lambda name: "/usr/bin/ffmpeg")
+    captured = {}
+
+    def _run(cmd, **kwargs):
+        captured["cmd"] = cmd
+
+        class _R:
+            stdout = b"\x00\x00" * 100
+
+        return _R()
+
+    monkeypatch.setattr(transcriber.subprocess, "run", _run)
+
+    samples = transcriber._decode_slice(Path("/tmp/a.opus"), 90.0, 30.0)
+
+    cmd = captured["cmd"]
+    assert "-ss" in cmd and cmd[cmd.index("-ss") + 1] == "90.000"
+    assert "-t" in cmd and cmd[cmd.index("-t") + 1] == "30.000"
+    # -ss must precede -i, otherwise ffmpeg decodes and discards everything first.
+    assert cmd.index("-ss") < cmd.index("-i")
+    assert samples.dtype == transcriber.np.float32
+    assert len(samples) == 100

@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import av
+import numpy as np
 import torch
 from faster_whisper import WhisperModel
 
@@ -18,9 +20,15 @@ from .config import (
     AUDIO_DIR,
     CHUNK_DURATION_SECONDS,
     CHUNK_OVERLAP_SECONDS,
+    TRANSCRIBE_SLICE_OVERLAP_SECONDS,
+    TRANSCRIBE_SLICE_SECONDS,
     TRANSCRIPT_DIR,
     WHISPER_MODEL,
 )
+
+# Sample rate Whisper expects; decoded slices are handed to the model directly
+# as float32 arrays, so they must already be at this rate.
+_SAMPLE_RATE = 16000
 
 
 def download_audio(video_id: str, url: str) -> Path:
@@ -131,6 +139,119 @@ def _window_segments(
     return chunks
 
 
+def _probe_duration(audio_path: Path) -> float | None:
+    """Return the audio duration in seconds, or None if the container omits it.
+
+    Uses PyAV's container metadata rather than decoding, so this is O(1) in file
+    size. A None result means we cannot tell how many slices are needed, and the
+    caller falls back to a single whole-file pass.
+    """
+    try:
+        with av.open(str(audio_path), metadata_errors="ignore") as container:
+            if container.duration is None:
+                return None
+            return container.duration / av.time_base
+    except Exception:
+        return None
+
+
+def _decode_slice(audio_path: Path, start: float, duration: float) -> np.ndarray:
+    """Decode ``[start, start+duration)`` as 16 kHz mono float32 via ffmpeg.
+
+    Decoding a bounded span is the whole point: faster-whisper's own
+    ``decode_audio`` only takes a file, which would put the entire track back in
+    memory and defeat the slicing. ``-ss`` before ``-i`` makes ffmpeg seek on the
+    input rather than decode-and-discard, so cost is proportional to the slice,
+    not the offset. ffmpeg is already a hard dependency (yt-dlp's opus repack).
+    """
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if ffmpeg_bin is None:
+        raise RuntimeError(
+            "ffmpeg not found on PATH; required to transcribe long audio in slices."
+        )
+
+    result = subprocess.run(
+        [
+            ffmpeg_bin,
+            "-nostdin",
+            "-loglevel", "error",
+            "-ss", f"{start:.3f}",
+            "-t", f"{duration:.3f}",
+            "-i", str(audio_path),
+            "-f", "s16le",
+            "-ac", "1",
+            "-ar", str(_SAMPLE_RATE),
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+        timeout=600,
+    )
+    # s16le → float32 in [-1, 1), matching what decode_audio would have produced.
+    return np.frombuffer(result.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _run_model(
+    audio: Any, model: WhisperModel, offset: float = 0.0
+) -> list[dict[str, Any]]:
+    """Transcribe one unit of audio (a path or a sample array) into raw segments.
+
+    ``offset`` is added to every timestamp so a slice decoded from the middle of
+    a file reports positions on the original file's timeline. Whisper's own
+    timestamps are preserved otherwise — nothing is interpolated.
+    """
+    segments_iter, _info = model.transcribe(
+        audio,
+        language="en",
+        initial_prompt=_WHISPER_PROMPT,
+        word_timestamps=False,
+        vad_filter=True,
+    )
+    return [
+        {
+            "start": float(s.start) + offset,
+            "end": float(s.end) + offset,
+            "text": s.text.strip(),
+        }
+        for s in segments_iter
+        if s.text.strip()
+    ]
+
+
+def _transcribe_sliced(
+    audio_path: Path, model: WhisperModel, duration: float
+) -> list[dict[str, Any]]:
+    """Transcribe long audio in bounded slices, concatenating the segments.
+
+    Slice k nominally covers ``[k*S, (k+1)*S)`` but is decoded from
+    ``k*S - overlap`` so the model has left context across the seam. Segments
+    starting before the nominal boundary are dropped: the previous slice already
+    emitted them, and this keeps the joined output free of duplicates while
+    leaving no gap (the previous slice cannot emit past its own end).
+    """
+    raw_segments: list[dict[str, Any]] = []
+    nominal_start = 0.0
+
+    while nominal_start < duration:
+        read_from = max(0.0, nominal_start - TRANSCRIBE_SLICE_OVERLAP_SECONDS)
+        read_until = min(nominal_start + TRANSCRIBE_SLICE_SECONDS, duration)
+        samples = _decode_slice(audio_path, read_from, read_until - read_from)
+
+        if samples.size:
+            for segment in _run_model(samples, model, offset=read_from):
+                # First slice has no predecessor, so nothing to deduplicate.
+                if nominal_start > 0 and segment["start"] < nominal_start:
+                    continue
+                raw_segments.append(segment)
+
+        # Drop the slice's samples before decoding the next one, so two slices'
+        # worth of audio are never resident at once.
+        del samples
+        nominal_start += TRANSCRIBE_SLICE_SECONDS
+
+    return raw_segments
+
+
 def load_whisper_model() -> WhisperModel:
     """Load Whisper using the best device + compute_type for the current host.
 
@@ -148,23 +269,24 @@ def transcribe_audio(audio_path: Path, model: WhisperModel | None = None) -> lis
     a CHUNK_DURATION_SECONDS window over Whisper's native segments with
     CHUNK_OVERLAP_SECONDS of overlap between adjacent windows. Timestamps are
     Whisper's own — not interpolated.
+
+    Audio longer than TRANSCRIBE_SLICE_SECONDS is transcribed slice by slice
+    rather than in one pass. faster-whisper holds the whole decoded track plus a
+    log-mel spectrogram of it in memory, so a single pass costs RAM in
+    proportion to video length (~8.7 GB for 2h20m) and silently OOM-kills a
+    memory-capped container. Slicing keeps the peak flat; shorter audio takes
+    the original single-pass path untouched.
     """
     if model is None:
         model = load_whisper_model()
 
-    segments_iter, _info = model.transcribe(
-        str(audio_path),
-        language="en",
-        initial_prompt=_WHISPER_PROMPT,
-        word_timestamps=False,
-        vad_filter=True,
-    )
+    duration = _probe_duration(audio_path)
+    if TRANSCRIBE_SLICE_SECONDS and duration is not None and duration > TRANSCRIBE_SLICE_SECONDS:
+        raw_segments = _transcribe_sliced(audio_path, model, duration)
+    else:
+        # Hand the path straight to faster-whisper, which decodes it itself.
+        raw_segments = _run_model(str(audio_path), model)
 
-    raw_segments = [
-        {"start": float(s.start), "end": float(s.end), "text": s.text.strip()}
-        for s in segments_iter
-        if s.text.strip()
-    ]
     if not raw_segments:
         return []
 

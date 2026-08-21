@@ -52,6 +52,28 @@ MIN_DURATION_SECONDS = _env_int("MIN_DURATION_SECONDS", 15 * 60, min_value=0)
 # ── Whisper ────────────────────────────────────────────
 WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "small")
 
+# faster-whisper decodes the whole track into RAM and computes a single log-mel
+# spectrogram over all of it, so peak memory grows with audio length — measured
+# ~8.7 GB RSS for a 2h20m video against a ~1.7 GB baseline. In an 8 GB container
+# that gets the process OOM-killed mid-run: no Python exception is raised, so the
+# ingest worker's error handling never fires and every video still queued behind
+# it is silently dropped. Audio longer than this is transcribed in slices so the
+# peak stays flat regardless of duration. Set to 0 to transcribe in one pass.
+TRANSCRIBE_SLICE_SECONDS = _env_int("TRANSCRIBE_SLICE_SECONDS", 20 * 60, min_value=0)
+
+# Seconds of preceding audio each slice re-reads, so Whisper has left context at
+# a boundary instead of starting cold mid-sentence. Segments beginning before the
+# slice's nominal start are discarded, since the previous slice already covered
+# that span — the overlap conditions the decode without duplicating output.
+TRANSCRIBE_SLICE_OVERLAP_SECONDS = _env_int(
+    "TRANSCRIBE_SLICE_OVERLAP_SECONDS", 5, min_value=0
+)
+if TRANSCRIBE_SLICE_SECONDS and TRANSCRIBE_SLICE_OVERLAP_SECONDS >= TRANSCRIBE_SLICE_SECONDS:
+    raise ConfigError(
+        f"TRANSCRIBE_SLICE_OVERLAP_SECONDS ({TRANSCRIBE_SLICE_OVERLAP_SECONDS}) must "
+        f"be less than TRANSCRIBE_SLICE_SECONDS ({TRANSCRIBE_SLICE_SECONDS})."
+    )
+
 # ── Ollama ─────────────────────────────────────────────
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "qwen3-embedding:0.6b")
